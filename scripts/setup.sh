@@ -3,11 +3,23 @@ set -e
 
 # Devin-9Router-Bridge Setup
 # Connects Devin models (GLM-5.2, etc.) to Claude Code + ClaudeKit via 9router
+#
+# Prerequisites (must be installed BEFORE running this script):
+#   - Node.js 18+
+#   - 9router (npm install -g 9router)
+#   - Claude Code (npm install -g @anthropic-ai/claude-code)
+#   - ClaudeKit (ck --version should work)
+#   - Devin CLI authenticated (devin auth status should show "Logged in")
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROXY_DIR="$SCRIPT_DIR/../proxy"
 INSTALL_DIR="$HOME/.devin-9router-bridge"
 NODE_BIN="${NODE_BIN:-$(which node)}"
+
+# Configurable ports (override via environment variables)
+GLM_PROXY_PORT="${GLM_PROXY_PORT:-20130}"
+ROUTER_PORT="${ROUTER_PORT:-20128}"
+WINDSURF_PORT="${WINDSURF_PORT:-8083}"
 
 # Colors
 RED='\033[0;31m'
@@ -41,18 +53,32 @@ ok "9router: $(9router --version 2>/dev/null || echo 'installed')"
 command -v claude >/dev/null 2>&1 || fail "Claude Code not found. Install: npm install -g @anthropic-ai/claude-code"
 ok "Claude Code: $(claude --version 2>/dev/null || echo 'installed')"
 
-# Check Devin credentials
-CRED_FILE="$HOME/.codeium/windsurf/credentials.toml"
-if [ ! -f "$CRED_FILE" ]; then
-    warn "Devin credentials not found at: $CRED_FILE"
-    echo "       Install Windsurf IDE and login, or create the file manually."
+# ClaudeKit is optional but recommended
+if command -v ck >/dev/null 2>&1; then
+    ok "ClaudeKit: $(ck --version 2>/dev/null || echo 'installed')"
+else
+    warn "ClaudeKit not found (optional, but recommended for /ck-help etc.)"
+fi
+
+# Check Devin credentials — try both Windsurf IDE path and Devin CLI path
+CRED_FILE=""
+if [ -f "$HOME/.local/share/devin/credentials.toml" ]; then
+    CRED_FILE="$HOME/.local/share/devin/credentials.toml"
+    ok "Devin credentials found (Devin CLI path)"
+elif [ -f "$HOME/.codeium/windsurf/credentials.toml" ]; then
+    CRED_FILE="$HOME/.codeium/windsurf/credentials.toml"
+    ok "Devin credentials found (Windsurf IDE path)"
+else
+    warn "Devin credentials not found."
+    echo "       Run 'devin auth login' to authenticate with Devin."
+    echo "       Or install Windsurf IDE and login."
     echo "       See: docs/GETTING_DEVIN_TOKEN.md"
     exit 1
 fi
+
 if ! grep -q "windsurf_api_key" "$CRED_FILE" 2>/dev/null; then
-    fail "No windsurf_api_key in credentials.toml"
+    fail "No windsurf_api_key in $CRED_FILE"
 fi
-ok "Devin credentials found"
 
 echo ""
 
@@ -69,15 +95,15 @@ ok "Installed to: $INSTALL_DIR/"
 echo ""
 
 # ─── 3. Start windsurf-server (Devin → OpenAI API) ───────────────────────────
-echo -e "${CYAN}[3/6]${NC} Starting windsurf-server (port 8083)..."
+echo -e "${CYAN}[3/6]${NC} Starting windsurf-server (port $WINDSURF_PORT)..."
 echo ""
 
-if curl -s http://127.0.0.1:8083/health >/dev/null 2>&1; then
+if curl -s http://127.0.0.1:$WINDSURF_PORT/health >/dev/null 2>&1; then
     ok "Already running"
 else
-    nohup "$NODE_BIN" "$INSTALL_DIR/windsurf-server.js" 8083 >/tmp/windsurf-server.log 2>&1 &
+    nohup "$NODE_BIN" "$INSTALL_DIR/windsurf-server.js" $WINDSURF_PORT >/tmp/windsurf-server.log 2>&1 &
     sleep 2
-    curl -s http://127.0.0.1:8083/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check /tmp/windsurf-server.log"
+    curl -s http://127.0.0.1:$WINDSURF_PORT/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check /tmp/windsurf-server.log"
 fi
 
 echo ""
@@ -87,39 +113,41 @@ echo -e "${CYAN}[4/6]${NC} Configuring 9router..."
 echo ""
 
 # Check if 9router is running
-if ! curl -s http://127.0.0.1:20128/health >/dev/null 2>&1; then
-    warn "9router not running on port 20128. Start it with: 9router start"
+if ! curl -s http://127.0.0.1:$ROUTER_PORT/ >/dev/null 2>&1; then
+    warn "9router not running on port $ROUTER_PORT."
+    echo "       Start it with: 9router start"
+    echo "       If your 9router uses a different port, set ROUTER_PORT env var."
     echo "       After starting, re-run this script."
     exit 1
 fi
-ok "9router is running"
+ok "9router is running (port $ROUTER_PORT)"
 
 # Check if windsurf provider is already configured
 ROUTER_DB="$HOME/.9router/db.json"
-if grep -q "8083" "$ROUTER_DB" 2>/dev/null; then
+if [ -f "$ROUTER_DB" ] && grep -q "$WINDSURF_PORT" "$ROUTER_DB" 2>/dev/null; then
     ok "Windsurf provider already configured in 9router"
 else
     info "Add windsurf provider to 9router:"
     echo "       In 9router UI → Settings → Providers → Add Custom Provider"
     echo "       Type: OpenAI-compatible"
-    echo "       Base URL: http://127.0.0.1:8083/v1"
+    echo "       Base URL: http://127.0.0.1:$WINDSURF_PORT/v1"
     echo "       API Key: devin"
-    warn "Configure this manually, then press Enter to continue..."
-    read
+    warn "Configure this in 9router UI, then press Enter to continue..."
+    read -r
 fi
 
 echo ""
 
 # ─── 5. Start glm-proxy ──────────────────────────────────────────────────────
-echo -e "${CYAN}[5/6]${NC} Starting glm-proxy (port 20130)..."
+echo -e "${CYAN}[5/6]${NC} Starting glm-proxy (port $GLM_PROXY_PORT → $ROUTER_PORT)..."
 echo ""
 
-if curl -s http://127.0.0.1:20130/health >/dev/null 2>&1; then
+if curl -s http://127.0.0.1:$GLM_PROXY_PORT/health >/dev/null 2>&1; then
     ok "Already running"
 else
-    nohup "$NODE_BIN" "$INSTALL_DIR/glm-proxy.js" 20130 20128 >/tmp/glm-proxy.log 2>&1 &
+    nohup "$NODE_BIN" "$INSTALL_DIR/glm-proxy.js" $GLM_PROXY_PORT $ROUTER_PORT >/tmp/glm-proxy.log 2>&1 &
     sleep 2
-    curl -s http://127.0.0.1:20130/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check /tmp/glm-proxy.log"
+    curl -s http://127.0.0.1:$GLM_PROXY_PORT/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check /tmp/glm-proxy.log"
 fi
 
 echo ""
@@ -129,16 +157,30 @@ echo -e "${CYAN}[6/6]${NC} Configuring Claude Code..."
 echo ""
 
 SETTINGS_FILE="$HOME/.claude/settings.json"
-API_KEY=$(python3 -c "
+
+# Try to detect existing 9router API key
+API_KEY=""
+if [ -f "$SETTINGS_FILE" ]; then
+    API_KEY=$(python3 -c "
 import json
-d = json.load(open('$SETTINGS_FILE'))
-print(d.get('env',{}).get('ANTHROPIC_API_KEY',''))
+try:
+    d = json.load(open('$SETTINGS_FILE'))
+    print(d.get('env',{}).get('ANTHROPIC_API_KEY',''))
+except: print('')
 " 2>/dev/null)
+fi
 
 if [ -z "$API_KEY" ]; then
-    warn "No ANTHROPIC_API_KEY found in settings.json"
-    echo "       Set your 9router API key manually."
-    API_KEY="your-9router-api-key"
+    # Try to get 9router API key from 9router config
+    if [ -f "$HOME/.9router/auth" ]; then
+        API_KEY=$(cat "$HOME/.9router/auth" 2>/dev/null | head -1)
+    fi
+fi
+
+if [ -z "$API_KEY" ]; then
+    warn "No API key found. You'll need to set it manually."
+    echo "       Get your 9router API key from the 9router UI."
+    API_KEY="YOUR_9ROUTER_API_KEY"
 fi
 
 # Backup existing settings
@@ -147,25 +189,34 @@ if [ -f "$SETTINGS_FILE" ]; then
     ok "Backed up existing settings.json"
 fi
 
-# Update settings.json
+# Update settings.json — preserve existing keys, only override what we need
 python3 -c "
-import json
-with open('$SETTINGS_FILE') as f:
-    d = json.load(f)
+import json, sys
+
+settings_file = '$SETTINGS_FILE'
+api_key = '$API_KEY'
+base_url = 'http://localhost:$GLM_PROXY_PORT'
+
+try:
+    with open(settings_file) as f:
+        d = json.load(f)
+except:
+    d = {}
+
 d.setdefault('env', {})
-d['env']['ANTHROPIC_BASE_URL'] = 'http://localhost:20130'
-d['env']['ANTHROPIC_API_KEY'] = '$API_KEY'
+d['env']['ANTHROPIC_BASE_URL'] = base_url
+d['env']['ANTHROPIC_API_KEY'] = api_key
 d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] = 'ws/glm-5-2'
 d['env']['ANTHROPIC_DEFAULT_SONNET_MODEL'] = 'ws/glm-5-2'
 d['env']['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = 'ws/glm-5-2'
 d['model'] = 'ws/glm-5-2'
-d.setdefault('fallbackModels', [])
-if 'cx/gpt-5.5' not in d['fallbackModels']:
-    d['fallbackModels'].insert(0, 'cx/gpt-5.5')
-with open('$SETTINGS_FILE', 'w') as f:
+
+with open(settings_file, 'w') as f:
     json.dump(d, f, indent=2)
 "
 ok "Updated ~/.claude/settings.json"
+ok "  ANTHROPIC_BASE_URL = http://localhost:$GLM_PROXY_PORT"
+ok "  model = ws/glm-5-2"
 echo ""
 
 # ─── Done ────────────────────────────────────────────────────────────────────
@@ -174,15 +225,15 @@ echo -e "${GREEN}  ║   ✓ Setup Complete!                                  �
 echo -e "${GREEN}  ╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}  ║                                                      ║${NC}"
 echo -e "${GREEN}  ║   Architecture:                                       ║${NC}"
-echo -e "${GREEN}  ║   Claude Code → glm-proxy (20130)                     ║${NC}"
-echo -e "${GREEN}  ║              → 9router (20128)                        ║${NC}"
-echo -e "${GREEN}  ║              → windsurf-server (8083)                 ║${NC}"
-echo -e "${GREEN}  ║              → Devin/Cognition (GLM-5.2)              ║${NC}"
-echo -e "${GREEN}  ║                                                      ║${NC}"
+echo -e "${GREEN}  ║   Claude Code → glm-proxy (port $GLM_PROXY_PORT)               ${NC}"
+echo -e "${GREEN}  ║              → 9router (port $ROUTER_PORT)                    ${NC}"
+echo -e "${GREEN}  ║              → windsurf-server (port $WINDSURF_PORT)          ${NC}"
+echo -e "${GREEN}  ║              → Devin/Cognition (GLM-5.2)                    ${NC}"
+echo -e "${GREEN}  ║                                                      ${NC}"
 echo -e "${GREEN}  ║   Next steps:                                         ║${NC}"
 echo -e "${GREEN}  ║   1. Restart Claude Code (exit and relaunch)          ║${NC}"
-echo -e "${GREEN}  ║   2. Install ClaudeKit: ./scripts/install-claudekit.sh║${NC}"
-echo -e "${GREEN}  ║   3. Try: /ck-help in Claude Code                     ║${NC}"
-echo -e "${GREEN}  ║                                                      ║${NC}"
+echo -e "${GREEN}  ║   2. Try: /ck-help in Claude Code                     ║${NC}"
+echo -e "${GREEN}  ║   3. (Optional) Auto-start: ./scripts/auto-start.sh   ║${NC}"
+echo -e "${GREEN}  ║                                                      ${NC}"
 echo -e "${GREEN}  ╚══════════════════════════════════════════════════════╝${NC}"
 echo ""

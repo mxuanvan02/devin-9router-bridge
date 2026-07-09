@@ -2,6 +2,26 @@
 
 ## Common Issues
 
+### `[Error: There was an error with your Cascade session, please update your editor]`
+
+**Cause**: Devin session token has expired or is invalid.
+
+**Fix**:
+```bash
+# Re-authenticate with Devin
+devin auth logout
+devin auth login
+
+# Restart windsurf-server to reload token
+pkill -f windsurf-server
+node ~/.devin-9router-bridge/windsurf-server.js 8083 &
+
+# Verify it works
+curl http://127.0.0.1:8083/v1/models
+```
+
+---
+
 ### `[Error: internal error occurred (trace ID: ...)]`
 
 **Cause**: GLM-5.2 received "You are Claude Code" in the system prompt.
