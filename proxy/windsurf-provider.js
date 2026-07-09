@@ -20,6 +20,7 @@ const path = require("path");
 const protobuf = require("protobufjs");
 const fs = require("fs");
 const os = require("os");
+const { execSync } = require("child_process");
 
 const PROTO_PATH = path.join(__dirname, "..", "mitm", "windsurf.proto");
 
@@ -34,26 +35,143 @@ function loadProto() {
   _GetChatMessageResponse = _root.lookupType("exa.api_server_pb.GetChatMessageResponse");
 }
 
+// ─── Credential cache with auto-refresh ──────────────────────────────────────
+let _cachedCredentials = null;
+let _cachedAt = 0;
+let _credFileMtime = 0;
+const CRED_CACHE_TTL_MS = 30000; // Re-read at most every 30s
+let _refreshInProgress = false;
+
 /**
- * Read Devin session token from credentials.toml
- * Returns: { sessionToken, apiServerUrl, devinApiUrl }
+ * Find credentials.toml — checks both Devin CLI and Windsurf IDE paths.
  */
-function readDevinCredentials() {
-  const credPath = path.join(os.homedir(), ".local", "share", "devin", "credentials.toml");
-  if (!fs.existsSync(credPath)) {
-    throw new Error(`Devin credentials not found at ${credPath}. Run 'devin' to authenticate first.`);
+function findCredentialsFile() {
+  const paths = [
+    path.join(os.homedir(), ".local", "share", "devin", "credentials.toml"),
+    path.join(os.homedir(), ".codeium", "windsurf", "credentials.toml"),
+  ];
+  for (const p of paths) {
+    if (fs.existsSync(p)) return p;
   }
+  return null;
+}
+
+/**
+ * Read Devin session token from credentials.toml.
+ * Caches result but re-reads if:
+ *   - Cache TTL expired (30s)
+ *   - File modification time changed
+ *   - force=true
+ * Returns: { sessionToken, apiServerUrl, devinApiUrl, credPath }
+ */
+function readDevinCredentials(force = false) {
+  const now = Date.now();
+  const credPath = findCredentialsFile();
+  if (!credPath) {
+    throw new Error(
+      "Devin credentials not found. Run 'devin auth login' to authenticate."
+    );
+  }
+
+  // Check file modification time
+  const stat = fs.statSync(credPath);
+  const fileChanged = stat.mtimeMs !== _credFileMtime;
+  const cacheExpired = now - _cachedAt > CRED_CACHE_TTL_MS;
+
+  if (!force && _cachedCredentials && !fileChanged && !cacheExpired) {
+    return _cachedCredentials;
+  }
+
   const content = fs.readFileSync(credPath, "utf8");
   const tokenMatch = content.match(/windsurf_api_key\s*=\s*"([^"]+)"/);
   const serverMatch = content.match(/api_server_url\s*=\s*"([^"]+)"/);
   const devinMatch = content.match(/devin_api_url\s*=\s*"([^"]+)"/);
   if (!tokenMatch) throw new Error("No windsurf_api_key found in credentials.toml");
-  return {
+
+  _cachedCredentials = {
     sessionToken: tokenMatch[1],
     apiServerUrl: serverMatch ? serverMatch[1] : "https://server.codeium.com",
     devinApiUrl: devinMatch ? devinMatch[1] : "https://api.devin.ai",
+    credPath,
   };
+  _cachedAt = now;
+  _credFileMtime = stat.mtimeMs;
+
+  return _cachedCredentials;
 }
+
+/**
+ * Try to refresh the Devin session token by running `devin auth status`.
+ * This may trigger the Devin CLI to refresh the token and write it back to
+ * credentials.toml. After calling this, re-read credentials.
+ *
+ * Returns true if the token changed, false otherwise.
+ */
+function tryRefreshDevinToken() {
+  if (_refreshInProgress) return false;
+  _refreshInProgress = true;
+
+  try {
+    const oldToken = _cachedCredentials?.sessionToken || "";
+
+    // Run `devin auth status` — this may trigger a token refresh
+    // Use a short timeout so we don't block too long
+    try {
+      execSync("devin auth status", {
+        timeout: 10000,
+        stdio: "pipe",
+        env: { ...process.env },
+      });
+    } catch {
+      // `devin auth status` may return non-zero if token is expired,
+      // but it might still refresh the token file
+    }
+
+    // Force re-read credentials
+    const newCreds = readDevinCredentials(true);
+    const tokenChanged = newCreds.sessionToken !== oldToken;
+
+    if (tokenChanged) {
+      console.error("[windsurf-provider] Token refreshed successfully");
+    } else {
+      console.error("[windsurf-provider] Token unchanged after refresh attempt");
+    }
+
+    return tokenChanged;
+  } catch (e) {
+    console.error(`[windsurf-provider] Token refresh failed: ${e.message}`);
+    return false;
+  } finally {
+    _refreshInProgress = false;
+  }
+}
+
+// Watch credentials file for changes (Devin CLI may refresh it in background)
+let _fileWatcher = null;
+function startCredentialWatcher() {
+  const credPath = findCredentialsFile();
+  if (!credPath) return;
+
+  try {
+    _fileWatcher = fs.watch(credPath, (eventType) => {
+      if (eventType === "change" || eventType === "rename") {
+        // Debounce: wait a bit for the file to be fully written
+        setTimeout(() => {
+          try {
+            readDevinCredentials(true);
+            console.error("[windsurf-provider] Credentials file changed, re-read token");
+          } catch (e) {
+            // File might be temporarily empty during write
+          }
+        }, 500);
+      }
+    });
+    _fileWatcher.on("error", () => {}); // Ignore watcher errors
+  } catch {
+    // fs.watch not available on all platforms
+  }
+}
+startCredentialWatcher();
 
 /**
  * Build a Connect-RPC request frame.
@@ -448,14 +566,17 @@ function windsurfFrameToOpenAISSE(decoded, requestId, modelName) {
  * Main executor function.
  * Called by 9router when a request targets the "windsurf" provider.
  *
+ * Credentials are auto-refreshed from credentials.toml (with file watcher).
+ * On expired token errors, a clear error message is returned.
+ *
  * @param {object} openaiReq - OpenAI /v1/chat/completions request body
- * @param {object} credentials - { sessionToken, apiServerUrl }
+ * @param {object} credentials - { sessionToken, apiServerUrl } (optional, auto-read if not provided)
  * @returns {object} { stream: ReadableStream, abort: Function }
  */
 async function execute(openaiReq, credentials) {
   loadProto();
 
-  // Use provided credentials or read from Devin CLI config
+  // Use provided credentials or read from Devin CLI config (with cache + auto-refresh)
   if (!credentials) {
     credentials = readDevinCredentials();
   }
@@ -494,6 +615,12 @@ async function execute(openaiReq, credentials) {
           try {
             const trailer = JSON.parse(frameData.toString());
             if (trailer.error) {
+              const errMsg = trailer.error.message || "Unknown error";
+              // Check if this is a session/token error that could be fixed by re-login
+              const isSessionError = /cascade session|update your editor|internal error/i.test(errMsg);
+              const hint = isSessionError
+                ? "\n[Hint: Your Devin session may have expired. Run 'devin auth login' to refresh.]"
+                : "";
               // Emit error as SSE
               const errChunk = {
                 id: requestId,
@@ -502,11 +629,18 @@ async function execute(openaiReq, credentials) {
                 model: modelName,
                 choices: [{
                   index: 0,
-                  delta: { content: `\n[Error: ${trailer.error.message}]` },
+                  delta: { content: `\n[Error: ${errMsg}]${hint}` },
                   finish_reason: "stop",
                 }],
               };
               this.push(`data: ${JSON.stringify(errChunk)}\n\n`);
+
+              // Log session errors for debugging
+              if (isSessionError) {
+                console.error(`[windsurf-provider] Session error: ${errMsg}`);
+                // Try to refresh token in background (non-blocking)
+                tryRefreshDevinToken();
+              }
             }
           } catch {}
           // Trailer means end of stream
@@ -605,6 +739,8 @@ module.exports = {
   execute,
   executeNonStreaming,
   readDevinCredentials,
+  tryRefreshDevinToken,
+  findCredentialsFile,
   openAIToWindsurf,
   windsurfFrameToOpenAISSE,
 };
