@@ -1,0 +1,323 @@
+syntax = "proto3";
+
+package exa.api_server_pb;
+option go_package = "github.com/codeium/exa/api_server_pb";
+
+// ============================================================
+// Devin CLI (Cognition/Windsurf) Protobuf Schemas
+// Reverse-engineered from binary analysis + live traffic capture
+// Date: 2026-07-09
+// ============================================================
+//
+// Transport: Connect-RPC (connectrpc.com)
+// Server:    server.codeium.com
+// Auth:      Basic auth, username = "devin-session-token$<JWT>"
+//
+// Two content types:
+//   application/proto        — unary RPCs (no framing)
+//   application/connect+proto — streaming RPCs (5-byte frame header:
+//     [1 byte flags][4 bytes BE length][message bytes]
+//     flags bit 0x02 = trailer frame)
+//
+// ============================================================
+// ApiServerService — LLM inference + config
+// ============================================================
+
+service ApiServerService {
+  rpc GetChatMessage(GetChatMessageRequest) returns (stream GetChatMessageResponse);
+  rpc GetCliModelConfigs(GetCliModelConfigsRequest) returns (GetCliModelConfigsResponse);
+}
+
+message GetAccountManagedPluginsRequest {}
+message GetAccountManagedPluginsResponse {}
+message SubmitBugReportRequest {}
+message SubmitBugReportResponse {}
+message RecordTrajectoryRequest {}
+message RecordTrajectoryResponse {}
+message GetWebSearchResultsRequest {}
+message GetWebSearchResultsResponse {}
+
+// ============================================================
+// GetChatMessage — the LLM inference request
+// ============================================================
+
+message GetChatMessageRequest {
+  // Field 1: Client info
+  ClientInfo client_info = 1;
+
+  // Field 2: System prompt
+  string system_prompt = 2;
+
+  // Field 3: Conversation messages (repeated, in order)
+  repeated ConversationMessage messages = 3;
+
+  // Field 7: Model index (numeric ID, 5 = GLM-5.2)
+  int32 model_index = 7;
+
+  // Field 8: Generation config
+  GenerationConfig generation_config = 8;
+
+  // Field 10: Tool definitions (repeated)
+  repeated ToolDefinition tools = 10;
+
+  // Field 15: Session metadata
+  SessionMeta session_meta = 15;
+
+  // Field 16: Session ID (UUID)
+  string session_id = 16;
+
+  // Field 20: Flag (1 = main chat, maybe 0 = title gen)
+  int32 chat_flag = 20;
+
+  // Field 21: Model name override ("glm-5-2", "swe-1-6-fast", etc.)
+  string model_name = 21;
+
+  // Field 22: Org/request ID (UUID)
+  string org_request_id = 22;
+}
+
+message ClientInfo {
+  string client_name = 1;      // "chisel"
+  string client_version = 2;   // "3000.1.27"
+  string api_key = 3;          // "devin-session-token$<JWT>"
+  string language = 4;         // "en"
+  string platform = 5;         // "mac"
+  string version = 7;          // "3000.1.27"
+  string client_name_2 = 12;   // "chisel" (duplicate)
+  string machine_id = 31;      // 128-byte hex hash
+}
+
+message ConversationMessage {
+  string message_id = 1;  // UUID
+  int32 role = 2;         // 1 = user, 2 = assistant
+  string content = 3;     // message text
+  repeated ImageData images = 4;  // images (vision models only)
+}
+
+message ImageData {
+  int32 width = 1;
+  int32 height = 2;
+  string base64_data = 3;   // base64-encoded image bytes (no data: prefix)
+  string mime_type = 4;     // "image/png", "image/jpeg", "image/webp", ...
+  string source_path = 5;   // optional original filename/path
+}
+
+message GenerationConfig {
+  int32 flag = 1;             // 1
+  int32 max_tokens = 2;       // 128000
+  int32 budget_tokens = 3;    // 400
+  double temperature = 5;     // 1.0
+  int32 top_k = 7;            // 40
+  double top_p = 8;           // 0.95
+}
+
+message ToolDefinition {
+  string name = 1;             // tool name
+  string description = 2;      // tool description
+  string json_schema = 3;      // JSON schema string
+}
+
+message SessionMeta {
+  string id = 1;       // UUID
+  int32 type = 2;      // 1
+  int32 subtype = 3;   // 4 (for title gen)
+}
+
+// ============================================================
+// GetChatMessageResponse — streaming response frames
+// ============================================================
+
+message GetChatMessageResponse {
+  // Field 1: Message ID ("bot-{uuid}")
+  string message_id = 1;
+
+  // Field 2: Timestamp
+  Timestamp timestamp = 2;
+
+  // Field 3: Delta content (text chunk or structured)
+  // In practice, field 3 is used as string for text deltas
+  string delta_text = 3;
+
+  // Field 4: Content type (1 = text, 5 = emoji/special)
+  int32 content_type = 4;
+
+  // Field 5: Stop reason (2 = stop, appears in final data frame)
+  int32 stop_reason = 5;
+
+  // Field 7: Metadata + usage
+  ResponseMetadata metadata = 7;
+
+  // Field 12: Progress metric (double, changes each frame)
+  double progress = 12;
+
+  // Field 17: Message UUID (without "bot-" prefix)
+  string message_uuid = 17;
+
+  // Field 28: Display statistics (token usage, response stats)
+  repeated DisplayStat display_stats = 28;
+}
+
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+message DeltaStructured {
+  // Field 9: char code or token ID (e.g., 105 = 'i')
+  int32 char_code = 9;
+}
+
+message ResponseMetadata {
+  // Field 2: input_tokens (in final frame)
+  int32 input_tokens = 2;
+  // Field 3: output_tokens
+  int32 output_tokens = 3;
+  // Field 5: total_tokens or cached_tokens
+  int32 cached_tokens = 5;
+  // Field 6: counter (30, increments per frame)
+  int32 counter = 6;
+  // Field 8: request ID header
+  Header request_id_header = 8;
+  // Field 9: model name ("glm-5-2")
+  string model_name = 9;
+}
+
+message Header {
+  string key = 1;    // "x-request-id"
+  string value = 2;  // "chatcmpl-..."
+}
+
+message DisplayStat {
+  string label = 1;           // "Response Statistics", "Token Usage"
+  repeated DisplayItem items = 2;
+}
+
+message DisplayItem {
+  string key = 5;             // "agent_messages", "input_tokens"
+  DisplayValue value = 4;
+}
+
+message DisplayValue {
+  string label = 1;           // "Input tokens"
+  float quantity = 2;         // numeric value
+  string singular = 3;        // " token"
+  string plural = 4;          // " tokens"
+}
+
+// ============================================================
+// GetCliModelConfigs — model registry
+// ============================================================
+
+message GetCliModelConfigsRequest {
+  ClientInfo client_info = 1;
+}
+
+message GetCliModelConfigsResponse {
+  repeated ClientModelConfig client_model_configs = 1;
+  string subagent_default_model_uid = 4;
+  // ... more fields
+}
+
+message ClientModelConfig {
+  string display_name = 1;          // "GLM-5.2 High"
+  float cost_multiplier = 3;        // 0x3fc00000 = 1.5
+  int32 is_recommended = 5;         // 1
+  int32 sort_priority = 10;         // 9
+  int32 is_premium = 11;            // 1
+  int32 is_default = 13;            // 1
+  int32 max_tokens = 18;            // 200000
+  string model_uid = 22;            // "glm-5-2"
+  ModelInfo model_info = 23;
+  int32 tier = 24;                  // 4
+  ModelFamilyMetadata family_metadata = 30;
+  int32 is_active = 31;             // 1
+  // ... more fields
+}
+
+message ModelInfo {
+  int32 type = 3;                   // 2
+  int32 max_output_tokens = 4;      // 200000
+  string tokenizer_type = 5;        // "LLAMA_WITH_SPECIAL"
+  ModelFeatures features = 6;
+  int32 context_window = 13;        // 128000
+  string model_id = 17;             // "glm-5-2"
+  string inference_server_url = 18; // "https://server.codeium.com"
+  string harness = 20;              // "strawberry-pancake"
+  // ... more fields
+}
+
+message ModelFeatures {
+  int32 feature_8 = 8;    // 1
+  int32 feature_12 = 12;  // 1
+  int32 feature_15 = 15;  // 1
+  int32 feature_24 = 24;  // 1
+}
+
+message ModelFamilyMetadata {
+  string family_name = 1;           // "GLM-5.2"
+  repeated ModelVariant variants = 2;
+  int32 is_default = 3;             // 1
+}
+
+message ModelVariant {
+  string label = 1;     // "Effort"
+  ModelVariantValue value = 2;
+}
+
+message ModelVariantValue {
+  int32 id = 1;         // 1
+  string name = 2;      // "High"
+}
+
+// ============================================================
+// SeatManagementService — auth + account
+// ============================================================
+
+service SeatManagementService {
+  rpc GetUserStatus(GetUserStatusRequest) returns (GetUserStatusResponse);
+}
+
+message GetCliTeamSettingsRequest {}
+message GetCliTeamSettingsResponse {}
+
+message GetUserStatusRequest {
+  ClientInfo client_info = 1;
+}
+
+message GetUserStatusResponse {
+  // Field 1: user status
+  UserStatus user_status = 1;
+  // Field 2: plan info
+  PlanInfo plan_info = 2;
+}
+
+message UserStatus {
+  // ... many fields (user email, plan type, quota, etc.)
+}
+
+message PlanInfo {
+  // ... plan details
+}
+
+message ExchangePkceRequest {
+  string code_verifier = 1;
+  string authorization_code = 2;
+  string redirect_uri = 3;
+}
+
+message ExchangePkceResponse {
+  string api_key = 1;
+  string api_server_url = 2;
+}
+
+message ExchangeDevinClipkceRequest {
+  string code_verifier = 1;
+  string authorization_code = 2;
+  string redirect_uri = 3;
+}
+
+message ExchangeDevinClipkceResponse {
+  string session_token = 1;
+  string devin_api_url = 2;
+  string devin_webapp_host = 3;
+}

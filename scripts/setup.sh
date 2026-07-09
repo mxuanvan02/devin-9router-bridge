@@ -41,7 +41,7 @@ echo "  ╚═══════════════════════
 echo ""
 
 # ─── 1. Prerequisites ────────────────────────────────────────────────────────
-echo -e "${CYAN}[1/6]${NC} Checking prerequisites..."
+echo -e "${CYAN}[1/7]${NC} Checking prerequisites..."
 echo ""
 
 command -v node >/dev/null 2>&1 || fail "Node.js not found. Install: brew install node"
@@ -83,19 +83,43 @@ fi
 echo ""
 
 # ─── 2. Install proxy files ──────────────────────────────────────────────────
-echo -e "${CYAN}[2/6]${NC} Installing proxy files..."
+echo -e "${CYAN}[2/7]${NC} Installing proxy files..."
 echo ""
 
 mkdir -p "$INSTALL_DIR"
 cp "$PROXY_DIR/glm-proxy.js" "$INSTALL_DIR/"
 cp "$PROXY_DIR/windsurf-server.js" "$INSTALL_DIR/"
 cp "$PROXY_DIR/windsurf-provider.js" "$INSTALL_DIR/"
+
+# Copy proto schema
+PROTO_SRC="$SCRIPT_DIR/../proto/windsurf.proto"
+if [ -f "$PROTO_SRC" ]; then
+    mkdir -p "$INSTALL_DIR/proto"
+    cp "$PROTO_SRC" "$INSTALL_DIR/proto/"
+    ok "Proto schema installed"
+fi
+
+# Install npm dependencies (protobufjs)
+if [ -f "$SCRIPT_DIR/../package.json" ]; then
+    cd "$SCRIPT_DIR/.."
+    if [ ! -d "node_modules" ] || [ ! -d "node_modules/protobufjs" ]; then
+        info "Installing npm dependencies (protobufjs)..."
+        npm install --production 2>&1 | tail -3
+    fi
+    ok "Dependencies ready"
+    # Link node_modules to install dir so windsurf-provider can find protobufjs
+    if [ -d "node_modules" ]; then
+        ln -sf "$(pwd)/node_modules" "$INSTALL_DIR/node_modules"
+    fi
+    cd "$SCRIPT_DIR"
+fi
+
 ok "Installed to: $INSTALL_DIR/"
 
 echo ""
 
 # ─── 3. Start windsurf-server (Devin → OpenAI API) ───────────────────────────
-echo -e "${CYAN}[3/6]${NC} Starting windsurf-server (port $WINDSURF_PORT)..."
+echo -e "${CYAN}[3/7]${NC} Starting windsurf-server (port $WINDSURF_PORT)..."
 echo ""
 
 if curl -s http://127.0.0.1:$WINDSURF_PORT/health >/dev/null 2>&1; then
@@ -109,7 +133,7 @@ fi
 echo ""
 
 # ─── 4. Configure 9router ───────────────────────────────────────────────────
-echo -e "${CYAN}[4/6]${NC} Configuring 9router..."
+echo -e "${CYAN}[4/7]${NC} Configuring 9router..."
 echo ""
 
 # Check if 9router is running
@@ -139,7 +163,7 @@ fi
 echo ""
 
 # ─── 5. Start glm-proxy ──────────────────────────────────────────────────────
-echo -e "${CYAN}[5/6]${NC} Starting glm-proxy (port $GLM_PROXY_PORT → $ROUTER_PORT)..."
+echo -e "${CYAN}[5/7]${NC} Starting glm-proxy (port $GLM_PROXY_PORT → $ROUTER_PORT)..."
 echo ""
 
 if curl -s http://127.0.0.1:$GLM_PROXY_PORT/health >/dev/null 2>&1; then
@@ -153,7 +177,7 @@ fi
 echo ""
 
 # ─── 6. Configure Claude Code ────────────────────────────────────────────────
-echo -e "${CYAN}[6/6]${NC} Configuring Claude Code..."
+echo -e "${CYAN}[6/7]${NC} Configuring Claude Code..."
 echo ""
 
 SETTINGS_FILE="$HOME/.claude/settings.json"

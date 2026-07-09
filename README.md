@@ -82,6 +82,8 @@ devin-9router-bridge/
 │   ├── glm-proxy.js              # Main bridge: Claude API ↔ GLM-5.2
 │   ├── windsurf-server.js        # Devin → OpenAI-compatible API server
 │   └── windsurf-provider.js      # Core: sends to server.codeium.com
+├── proto/
+│   └── windsurf.proto            # Protobuf schema (reverse-engineered)
 ├── scripts/
 │   ├── setup.sh                  # One-command setup
 │   └── auto-start.sh             # macOS launchd auto-start
@@ -89,6 +91,7 @@ devin-9router-bridge/
 │   ├── GETTING_DEVIN_TOKEN.md    # How to get Devin session token
 │   ├── TROUBLESHOOTING.md        # Common issues
 │   └── ARCHITECTURE.md           # How it works (detailed)
+├── package.json                  # npm dependencies (protobufjs)
 ├── README.md
 └── LICENSE
 ```

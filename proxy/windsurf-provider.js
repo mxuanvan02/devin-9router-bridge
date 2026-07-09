@@ -22,7 +22,7 @@ const fs = require("fs");
 const os = require("os");
 const { execSync } = require("child_process");
 
-const PROTO_PATH = path.join(__dirname, "..", "mitm", "windsurf.proto");
+const PROTO_PATH = path.join(__dirname, "..", "proto", "windsurf.proto");
 
 let _root = null;
 let _GetChatMessageRequest = null;

@@ -1,0 +1,18 @@
+{
+  "name": "devin-9router-bridge",
+  "version": "1.0.0",
+  "description": "Connect Devin models (GLM-5.2, etc.) to Claude Code + ClaudeKit via 9router",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mxuanvan02/devin-9router-bridge.git"
+  },
+  "scripts": {
+    "start:windsurf": "node proxy/windsurf-server.js 8083",
+    "start:glm-proxy": "node proxy/glm-proxy.js 20130 20128",
+    "setup": "./scripts/setup.sh"
+  },
+  "dependencies": {
+    "protobufjs": "^8.0.0"
+  }
+}
