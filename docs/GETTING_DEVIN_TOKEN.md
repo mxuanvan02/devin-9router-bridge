@@ -6,7 +6,6 @@ The bridge needs a Devin/Cognition session token to access GLM-5.2 and other mod
 
 1. **Install Devin CLI**
    - Follow the official instructions at [devin.ai](https://devin.ai)
-   - Or install via the provided installer
 
 2. **Login with your Devin account**
    ```bash
@@ -24,7 +23,7 @@ The bridge needs a Devin/Cognition session token to access GLM-5.2 and other mod
    ```bash
    cat ~/.local/share/devin/credentials.toml
    ```
-   
+
    You should see:
    ```toml
    windsurf_api_key = "devin-session-token$..."
@@ -37,11 +36,11 @@ The bridge needs a Devin/Cognition session token to access GLM-5.2 and other mod
    ```bash
    # Start windsurf-server
    node ~/.devin-9router-bridge/windsurf-server.js 8083
-   
+
    # Test it
    curl http://127.0.0.1:8083/v1/models
    ```
-   
+
    You should see a list of available models including `glm-5-2`.
 
 ## Option 2: Windsurf IDE
@@ -63,16 +62,15 @@ The bridge needs a Devin/Cognition session token to access GLM-5.2 and other mod
 
 If you have a Devin session token but no Devin CLI or Windsurf IDE:
 
-1. Create the credentials file:
-   ```bash
-   mkdir -p ~/.local/share/devin
-   cat > ~/.local/share/devin/credentials.toml << 'EOF'
-   windsurf_api_key = "devin-session-token$your-token-here"
-   api_server_url = "https://server.codeium.com"
-   devin_webapp_host = "app.devin.ai"
-   devin_api_url = "https://api.devin.ai"
-   EOF
-   ```
+```bash
+mkdir -p ~/.local/share/devin
+cat > ~/.local/share/devin/credentials.toml << 'EOF'
+windsurf_api_key = "devin-session-token$your-token-here"
+api_server_url = "https://server.codeium.com"
+devin_webapp_host = "app.devin.ai"
+devin_api_url = "https://api.devin.ai"
+EOF
+```
 
 ## Troubleshooting
 
@@ -81,7 +79,7 @@ If you have a Devin session token but no Devin CLI or Windsurf IDE:
 - Check the file path: `~/.local/share/devin/credentials.toml`
 - The setup script checks both `~/.local/share/devin/` and `~/.codeium/windsurf/`
 
-### "Cascade session error, please update your editor"
+### "Cascade session error" / "update your editor"
 - Your session token has expired
 - Run `devin auth logout` then `devin auth login` to refresh
 - Restart windsurf-server after refreshing:

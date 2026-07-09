@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
-# Devin-9Router-Bridge Setup
-# Connects Devin models (GLM-5.2, etc.) to Claude Code + ClaudeKit via 9router
+# Devin → 9Router Bridge Setup
+# Connects Devin models (GLM-5.2, etc.) to Claude Code via 9router
 #
 # Prerequisites (must be installed BEFORE running this script):
 #   - Node.js 18+
 #   - 9router (npm install -g 9router)
 #   - Claude Code (npm install -g @anthropic-ai/claude-code)
-#   - ClaudeKit (ck --version should work)
 #   - Devin CLI authenticated (devin auth status should show "Logged in")
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -36,7 +35,7 @@ warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
 echo ""
 echo "  ╔══════════════════════════════════════════════════════╗"
 echo "  ║   Devin-9Router-Bridge — Setup                       ║"
-echo "  ║   Devin models → 9router → Claude Code + ClaudeKit   ║"
+echo "  ║   Devin models → 9router → Claude Code               ║"
 echo "  ╚══════════════════════════════════════════════════════╝"
 echo ""
 
@@ -53,11 +52,11 @@ ok "9router: $(9router --version 2>/dev/null || echo 'installed')"
 command -v claude >/dev/null 2>&1 || fail "Claude Code not found. Install: npm install -g @anthropic-ai/claude-code"
 ok "Claude Code: $(claude --version 2>/dev/null || echo 'installed')"
 
-# ClaudeKit is optional but recommended
+# ClaudeKit is optional (not required for the bridge to function)
 if command -v ck >/dev/null 2>&1; then
     ok "ClaudeKit: $(ck --version 2>/dev/null || echo 'installed')"
 else
-    warn "ClaudeKit not found (optional, but recommended for /ck-help etc.)"
+    info "ClaudeKit not found (optional)"
 fi
 
 # Check Devin credentials — try both Windsurf IDE path and Devin CLI path
@@ -256,7 +255,7 @@ echo -e "${GREEN}  ║              → Devin/Cognition (GLM-5.2)               
 echo -e "${GREEN}  ║                                                      ${NC}"
 echo -e "${GREEN}  ║   Next steps:                                         ║${NC}"
 echo -e "${GREEN}  ║   1. Restart Claude Code (exit and relaunch)          ║${NC}"
-echo -e "${GREEN}  ║   2. Try: /ck-help in Claude Code                     ║${NC}"
+echo -e "${GREEN}  ║   2. Try any prompt in Claude Code                    ║${NC}"
 echo -e "${GREEN}  ║   3. (Optional) Auto-start: ./scripts/auto-start.sh   ║${NC}"
 echo -e "${GREEN}  ║                                                      ${NC}"
 echo -e "${GREEN}  ╚══════════════════════════════════════════════════════╝${NC}"

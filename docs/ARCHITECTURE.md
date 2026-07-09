@@ -5,10 +5,10 @@
 The bridge consists of three components that chain together to connect Claude Code to Devin's GLM-5.2:
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────┐     ┌─────────────────┐     ┌──────────────┐
-│ Claude Code │ ──▶ │  glm-proxy   │ ──▶ │ 9router  │ ──▶ │ windsurf-server │ ──▶ │ Devin/Cognition │
-│ + ClaudeKit │     │  (port 20130)│     │(port 20128)│   │  (port 8083)    │     │ server.codeium.com │
-└─────────────┘     └──────────────┘     └──────────┘     └─────────────────┘     └──────────────┘
+┌─────────────┐     ┌──────────────┐     ┌──────────┐     ┌─────────────────┐     ┌──────────────────┐
+│ Claude Code │ ──▶ │  glm-proxy   │ ──▶ │ 9router  │ ──▶ │ windsurf-server │ ──▶ │ Devin/Cognition  │
+│             │     │  (port 20130)│     │(port 20128)│   │  (port 8083)    │     │ server.codeium.com│
+└─────────────┘     └──────────────┘     └──────────┘     └─────────────────┘     └──────────────────┘
                      Rewrites prompts     Your router      OpenAI-compatible       GLM-5.2 backend
                      Converts tools                        proxy for Devin
 ```
@@ -39,22 +39,23 @@ OpenAI-compatible API server that wraps the Devin/Cognition backend.
 - Exposes `/v1/chat/completions` (streaming + non-streaming)
 - Exposes `/v1/models` (lists available Devin models)
 - Translates OpenAI format ↔ Devin's internal format
-- Uses the Devin session token from `~/.codeium/windsurf/credentials.toml`
+- Uses the Devin session token from `~/.local/share/devin/credentials.toml`
 
 ### 3. windsurf-provider.js
 
 Core provider module that communicates with `server.codeium.com` (Devin's backend).
 
-- Sends requests using Devin's proprietary protocol
-- Handles authentication via session token
+- Sends requests using Connect-RPC + protobuf
+- Handles authentication via session token (Basic auth)
 - Manages session IDs for conversation continuity
-- Parses Devin's response format
+- Parses Devin's streaming protobuf response format
+- Auto-refreshes credentials with file watcher + TTL cache
 
 ## Why This Architecture?
 
 ### Why not connect Claude Code directly to Devin?
 
-Claude Code expects the Anthropic Messages API format (`/v1/messages` with `tool_use` content blocks). Devin/Cognition uses a different protocol. The proxy bridges this gap.
+Claude Code expects the Anthropic Messages API format (`/v1/messages` with `tool_use` content blocks). Devin/Cognition uses a different protocol (Connect-RPC + protobuf). The proxy bridges this gap.
 
 ### Why use 9router in the middle?
 
@@ -75,32 +76,51 @@ The windsurf-server exposes Devin as an OpenAI-compatible API, which 9router can
 
 ## Data Flow Example
 
-When you type `/ck-help` in Claude Code:
+When you type a prompt in Claude Code:
 
 1. **Claude Code** sends a request to `http://localhost:20130/v1/messages` with:
    - System prompt: "You are Claude Code, Anthropic's official CLI..."
-   - Tools: bash, str_replace_based_edit_tool, etc.
-   - User message: "/ck-help"
+   - Tools: bash, file editor, etc.
+   - User message: your prompt
 
 2. **glm-proxy** transforms the request:
    - System prompt → "You are an interactive CLI-based coding assistant..." (1500 chars max)
-   - Tools → text instructions: "Output <tool_use name="TOOL_NAME">{json}</tool_use>"
+   - Tools → text instructions: `Output <tool_use name="TOOL_NAME">{json}</tool_use>`
    - Forwards to 9router at `http://localhost:20128/v1/messages`
 
 3. **9router** routes the request to the windsurf provider at `http://localhost:8083/v1/chat/completions`
 
-4. **windsurf-server** converts the request to Devin's format and sends to `server.codeium.com`
+4. **windsurf-server** converts the request to Devin's protobuf format and sends to `server.codeium.com`
 
-5. **Devin/Cognition** processes the request with GLM-5.2 and returns a response
+5. **Devin/Cognition** processes the request with GLM-5.2 and returns a streaming response
 
-6. **windsurf-server** converts the response back to OpenAI format
+6. **windsurf-server** converts the protobuf response back to OpenAI SSE format
 
 7. **9router** passes the response back to glm-proxy
 
 8. **glm-proxy** parses the response:
-   - If GLM output `<tool_use name="bash">{"command":"ck-help"}</tool_use>`:
+   - If GLM output `<tool_use name="bash">{"command":"ls"}</tool_use>`:
      - Converts to Anthropic `tool_use` content block
      - Sets `stop_reason: "tool_use"`
    - Streams the transformed response back to Claude Code
 
-9. **Claude Code** receives the tool_use block and executes the bash command
+9. **Claude Code** receives the tool_use block and executes the command
+
+## Protocol Details
+
+### Devin/Cognition API
+
+- **Transport:** Connect-RPC over HTTPS
+- **Encoding:** Protocol Buffers (protobuf)
+- **Auth:** Basic auth with session token as both username and password
+- **Endpoint:** `server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage`
+- **Streaming:** Server-side streaming with 5-byte frame headers
+  - `[1 byte flags][4 bytes BE length][message bytes]`
+  - `flags & 0x02` = trailer frame (JSON, end of stream)
+
+### Token Management
+
+- Token stored in `~/.local/share/devin/credentials.toml` (Devin CLI) or `~/.codeium/windsurf/credentials.toml` (Windsurf IDE)
+- Format: `devin-session-token$<JWT>`
+- JWT payload contains `session_id` only (no expiry field — server-controlled)
+- **Known limitation:** Devin CLI refreshes tokens in memory but doesn't write back to file

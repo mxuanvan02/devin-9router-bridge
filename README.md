@@ -1,100 +1,67 @@
-# Devin-9Router-Bridge
+# Devin → 9Router Bridge
 
-**Connect Devin models (GLM-5.2, etc.) to Claude Code + ClaudeKit via 9router.**
+> Use **Devin's GLM-5.2** (and other Cognition models) as a backend for **Claude Code** — no Anthropic API key required.
 
-If you already have [9router](https://www.npmjs.com/package/9router), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [ClaudeKit](https://github.com/unified-vista/claudekit-engineer), and a [Devin](https://devin.ai) account, this repo lets you use Devin's models (GLM-5.2 and others) as the backend — no Anthropic API key needed.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#)
+
+---
+
+## Why?
+
+[Devin](https://devin.ai) by Cognition provides access to powerful models like **GLM-5.2 High**, but its API isn't directly compatible with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). This bridge solves three incompatibilities:
+
+| Problem | Solution |
+|---------|----------|
+| GLM-5.2 errors on `"You are Claude Code"` identity | Rewrites system prompt to generic assistant |
+| GLM-5.2 has no native `tool_use` support | Converts tools ↔ text instructions (XML tags) |
+| Cognition API content filter blocks Claude Code prompts | Sanitizes security/billing/imperative language |
 
 ## Architecture
 
 ```
-Claude Code / ClaudeKit (Anthropic API format)
-        ↓
-glm-proxy (port 20130)              ← Rewrites prompts, converts tools
-        ↓
-9router (port 20128)               ← Your existing router
-        ↓
-windsurf-server (port 8083)        ← Devin → OpenAI-compatible API
-        ↓
-server.codeium.com                 ← Devin/Cognition backend (GLM-5.2)
+Claude Code (Anthropic API)
+      ↓
+glm-proxy (port 20130)         ← Rewrites prompts, converts tools
+      ↓
+9router (port 20128)           ← Your existing router
+      ↓
+windsurf-server (port 8083)    ← Devin → OpenAI-compatible API
+      ↓
+server.codeium.com             ← Devin/Cognition backend (GLM-5.2)
 ```
 
 ## Prerequisites
 
-You must have these installed and working BEFORE running setup:
+| Tool | Install | Required? |
+|------|---------|-----------|
+| [Node.js](https://nodejs.org/) 18+ | `brew install node` | ✅ Required |
+| [9router](https://www.npmjs.com/package/9router) | `npm install -g 9router` | ✅ Required |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | ✅ Required |
+| [Devin CLI](https://devin.ai) | See [Devin docs](https://devin.ai) | ✅ Required |
+| [ClaudeKit](https://github.com/unified-vista/claudekit-engineer) | Optional | ⬜ Optional |
 
-| Requirement | Install | Verify |
-|-------------|---------|--------|
-| **Node.js 18+** | `brew install node` | `node --version` |
-| **9router** | `npm install -g 9router` | `9router --version` |
-| **Claude Code** | `npm install -g @anthropic-ai/claude-code` | `claude --version` |
-| **ClaudeKit** | Follow [ClaudeKit docs](https://github.com/unified-vista/claudekit-engineer) | `ck --version` |
-| **Devin CLI** | Follow [Devin docs](https://devin.ai) | `devin auth status` |
-
-Devin must be authenticated (`devin auth status` shows "Logged in").
+> **Devin must be authenticated:** Run `devin auth login` before setup.
 
 ## Quick Start
 
 ```bash
-# 1. Clone this repo
+# Clone
 git clone https://github.com/mxuanvan02/devin-9router-bridge.git
 cd devin-9router-bridge
 
-# 2. Make sure 9router is running
+# Start 9router (if not already running)
 9router start
 
-# 3. Run setup (installs proxy, configures 9router + Claude Code)
+# Run setup — installs proxy, configures 9router + Claude Code
 ./scripts/setup.sh
 
-# 4. (Optional) Set up auto-start on boot
-./scripts/auto-start.sh
-
-# 5. Restart Claude Code (exit any running session, then relaunch)
+# Restart Claude Code, then test
 claude
-
-# 6. Test it works — in Claude Code, type:
-/ck-help
 ```
 
-## What This Bridge Fixes
-
-GLM-5.2 (via Devin/Cognition) is incompatible with Claude Code out of the box. This proxy fixes three issues:
-
-### 1. Identity Conflict
-**Problem**: GLM-5.2 outputs `[Error: internal error occurred]` when it sees "You are Claude Code, Anthropic's official CLI" in the system prompt.
-
-**Fix**: The proxy rewrites the system prompt to "You are an interactive CLI-based coding assistant".
-
-### 2. No Native Tool Use
-**Problem**: GLM-5.2 doesn't support Anthropic's `tool_use` format — it returns empty content when tools are provided.
-
-**Fix**: The proxy converts tool definitions to text instructions. GLM outputs `<tool_use name="bash">{"command":"ls"}</tool_use>` XML tags, which the proxy parses back into Anthropic `tool_use` content blocks.
-
-### 3. Content Policy Blocks
-**Problem**: Cognition API's content filter blocks Claude Code's system prompt because it contains security instructions, billing headers, and imperative language.
-
-**Fix**: The proxy sanitizes all of these before forwarding to the Cognition API.
-
-## Files
-
-```
-devin-9router-bridge/
-├── proxy/
-│   ├── glm-proxy.js              # Main bridge: Claude API ↔ GLM-5.2
-│   ├── windsurf-server.js        # Devin → OpenAI-compatible API server
-│   └── windsurf-provider.js      # Core: sends to server.codeium.com
-├── proto/
-│   └── windsurf.proto            # Protobuf schema (reverse-engineered)
-├── scripts/
-│   ├── setup.sh                  # One-command setup
-│   └── auto-start.sh             # macOS launchd auto-start
-├── docs/
-│   ├── GETTING_DEVIN_TOKEN.md    # How to get Devin session token
-│   ├── TROUBLESHOOTING.md        # Common issues
-│   └── ARCHITECTURE.md           # How it works (detailed)
-├── package.json                  # npm dependencies (protobufjs)
-├── README.md
-└── LICENSE
-```
+In Claude Code, any prompt will now route through GLM-5.2 via Devin.
 
 ## Configuration
 
@@ -106,14 +73,13 @@ devin-9router-bridge/
 | `ROUTER_PORT` | 20128 | 9router port |
 | `WINDSURF_PORT` | 8083 | windsurf-server port |
 
-Override before running setup:
 ```bash
 GLM_PROXY_PORT=20131 ROUTER_PORT=20129 ./scripts/setup.sh
 ```
 
 ### Claude Code Settings
 
-After setup, your `~/.claude/settings.json` will have:
+After setup, `~/.claude/settings.json` is updated:
 
 ```json
 {
@@ -130,22 +96,45 @@ After setup, your `~/.claude/settings.json` will have:
 
 ## Available Models
 
-Once configured, these models are available in Claude Code:
+| Model ID | Backend | Context |
+|----------|---------|---------|
+| `glm-5-2` | GLM-5.2 High (Cognition) | 128K |
+| `swe-1-7` | SWE-1.7 (Cognition, vision) | 128K |
+| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition, vision) | 96K |
+| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K |
 
-| Model alias | Backend |
-|-------------|---------|
-| `ws/glm-5-2` | GLM-5.2 via Devin/Cognition |
+Add more models by editing `proxy/windsurf-server.js`.
 
-You can add more Devin models by editing `proxy/windsurf-server.js`.
+## Project Structure
+
+```
+devin-9router-bridge/
+├── proxy/
+│   ├── glm-proxy.js              # Anthropic API ↔ GLM-5.2 bridge
+│   ├── windsurf-server.js        # Devin → OpenAI-compatible API server
+│   └── windsurf-provider.js      # Core: sends to server.codeium.com
+├── proto/
+│   └── windsurf.proto            # Protobuf schema (reverse-engineered)
+├── scripts/
+│   ├── setup.sh                  # One-command setup
+│   └── auto-start.sh             # macOS launchd auto-start
+├── docs/
+│   ├── GETTING_DEVIN_TOKEN.md    # How to get Devin session token
+│   ├── TROUBLESHOOTING.md        # Common issues & fixes
+│   └── ARCHITECTURE.md           # How it works (detailed)
+├── package.json                  # npm dependencies (protobufjs)
+├── LICENSE
+└── README.md
+```
 
 ## Debug
 
 ```bash
 # Run proxy with debug logging
-GLM_PROXY_DEBUG=1 node ~/.devin-9router-bridge/glm-proxy.js 20130 20128
+GLM_PROXY_DEBUG=1 node proxy/glm-proxy.js 20130 20128
 
 # Full debug (logs system prompts + messages)
-GLM_PROXY_DEBUG=2 node ~/.devin-9router-bridge/glm-proxy.js 20130 20128
+GLM_PROXY_DEBUG=2 node proxy/glm-proxy.js 20130 20128
 
 # Check logs
 tail -f /tmp/glm-proxy.log
@@ -154,15 +143,16 @@ tail -f /tmp/windsurf-server.log
 
 ## Limitations
 
-- **Streaming-focused**: Non-streaming responses are not fully tested
-- **macOS auto-start**: Uses launchd. For Linux, use systemd. For Windows, use a service wrapper.
-- **Content filter**: The Cognition API content filter is aggressive — some complex prompts may still be blocked.
-- **Single tool per turn**: GLM-5.2 may not reliably handle multiple tool calls in one response.
+- **Token expiry:** Devin CLI refreshes tokens in memory but doesn't write them back to `credentials.toml`. If you get "Cascade session" errors, run `devin auth login` again and restart windsurf-server.
+- **Streaming-focused:** Non-streaming responses are not fully tested.
+- **macOS auto-start:** Uses launchd. For Linux, use systemd. For Windows, use a service wrapper.
+- **Content filter:** The Cognition API content filter is aggressive — some complex prompts may still be blocked.
+- **Single tool per turn:** GLM-5.2 may not reliably handle multiple tool calls in one response.
 
 ## Uninstall
 
 ```bash
-# Stop proxy
+# Stop services
 launchctl unload ~/Library/LaunchAgents/com.devin-9router-bridge.glm-proxy.plist 2>/dev/null
 pkill -f "glm-proxy.js"
 pkill -f "windsurf-server.js"
@@ -174,13 +164,16 @@ rm -rf ~/.devin-9router-bridge
 # Look for ~/.claude/settings.json.bak.* and restore the latest one
 ```
 
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-MIT
+[MIT](LICENSE) © 2026
 
-## Credits
+## Acknowledgments
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) by Anthropic
 - [9router](https://www.npmjs.com/package/9router) by 9Router
 - [Devin](https://devin.ai) by Cognition
-- [ClaudeKit](https://github.com/unified-vista/claudekit-engineer) by Unified Vista

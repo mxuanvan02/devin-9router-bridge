@@ -103,19 +103,21 @@ function rewriteSystemPrompt(system) {
   text = text.replace(/NON-NEGOTIABLE/gi, "important");
   text = text.replace(/NO EXCEPTIONS/gi, "");
 
-  // Remove duplicate GitNexus blocks
-  const gitnexusRegex = /# GitNexus — Code Intelligence[\s\S]*?(?=<!-- gitnexus:end -->)/g;
-  let firstGitNexus = true;
-  text = text.replace(gitnexusRegex, (match) => {
-    if (firstGitNexus) { firstGitNexus = false; return match; }
+  // Remove duplicate code-intelligence blocks (e.g. GitNexus, Sourcegraph, etc.)
+  // These tools inject large context blocks that can duplicate and bloat the prompt
+  text = text.replace(/<!-- (?:gitnexus|sourcegraph|codestory):(start|end) -->/g, "");
+  const codeIntelRegex = /# (?:GitNexus|Sourcegraph|CodeStory) —[^\n]*[\s\S]*?(?=<!-- (?:gitnexus|sourcegraph|codestory):end -->)/g;
+  let firstCodeIntel = true;
+  text = text.replace(codeIntelRegex, (match) => {
+    if (firstCodeIntel) { firstCodeIntel = false; return match; }
     return "";
   });
-  text = text.replace(/<!-- gitnexus:(start|end) -->/g, "");
 
-  // Remove Homebrew AGENTS.md content
-  text = text.replace(/# Agent Instructions for Homebrew\/brew[\s\S]*?(?=\n#[^#]|\n## [A-Z]|\n---|$)/g, "");
+  // Remove package-manager agent instruction blocks (e.g. Homebrew AGENTS.md)
+  // These are injected by some tools and contain irrelevant packaging policies
+  text = text.replace(/# Agent Instructions for (?:Homebrew|npm|pip)[\s\S]*?(?=\n#[^#]|\n## [A-Z]|\n---|$)/g, "");
 
-  // Remove ClaudeKit boilerplate
+  // Remove boilerplate AGENTS.md / CLAUDE.md blocks from other tools
   text = text.replace(/# (?:AGENTS|CLAUDE)\.md[\s\S]*?(?=\n# (?:AGENTS|CLAUDE)\.md|\n## [A-Z]|$)/g, "");
 
   // Remove <system-reminder> tags from system prompt too
