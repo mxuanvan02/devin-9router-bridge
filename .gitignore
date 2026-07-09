@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.error.log
+credentials.toml
+.env
+.env.*
+.DS_Store
+*.bak
