@@ -145,6 +145,26 @@ tail -f /tmp/glm-proxy.log
 tail -f /tmp/windsurf-server.log
 ```
 
+## Context window configuration
+
+GLM-5.2 **unlimited** (via Devin/windsurf) supports **1M context** (1,048,576 tokens). The proxy defaults to **no truncation** (full context passthrough).
+
+For the **free tier** (200K context), set truncation limits via env vars:
+
+```bash
+# Free tier: truncate system prompt to 1500 chars, messages to 3000 chars
+GLM_PROXY_MAX_SYSTEM_LEN=1500 GLM_PROXY_MAX_MSG_LEN=3000 node proxy/glm-proxy.js
+
+# Unlimited (default): no truncation
+node proxy/glm-proxy.js
+```
+
+| Env var | Default | Description |
+|---|---|---|
+| `GLM_PROXY_MAX_SYSTEM_LEN` | `0` (no limit) | Max chars for system prompt (0 = no truncation) |
+| `GLM_PROXY_MAX_MSG_LEN` | `0` (no limit) | Max chars per message (0 = no truncation) |
+| `GLM_PROXY_DEBUG` | `0` | Debug logging level (1=basic, 2=verbose) |
+
 ## Auto-start (all platforms)
 
 | OS | Script | Service type |

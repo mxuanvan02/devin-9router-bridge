@@ -29,6 +29,14 @@ const PORT = parseInt(process.argv[2] || "20130", 10);
 const UPSTREAM_HOST = "127.0.0.1";
 const UPSTREAM_PORT = parseInt(process.argv[3] || "20128", 10);
 
+// ─── Context limits (env-configurable for unlimited/paid GLM-5.2) ──────────
+// GLM-5.2 unlimited supports 1M context. The original 1500/3000 char limits
+// were workarounds for the free-tier content filter. For the unlimited plan,
+// set GLM_PROXY_MAX_SYSTEM_LEN and GLM_PROXY_MAX_MSG_LEN to 0 (no truncation)
+// or a high value. Default: no truncation (0 = unlimited).
+const MAX_SYSTEM_LEN = parseInt(process.env.GLM_PROXY_MAX_SYSTEM_LEN || "0", 10);
+const MAX_MSG_LEN = parseInt(process.env.GLM_PROXY_MAX_MSG_LEN || "0", 10);
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /**
@@ -129,9 +137,10 @@ function rewriteSystemPrompt(system) {
   text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "");
   text = text.replace(/<system-reminder>[\s\S]*$/gi, "");
 
-  // Truncate aggressively — Cognition API content filter is very strict
-  const MAX_SYSTEM_LEN = 1500;
-  if (text.length > MAX_SYSTEM_LEN) {
+  // Truncate system prompt if limit is set (0 = no truncation).
+  // Default is 0 (no truncation) for unlimited GLM-5.2 with 1M context.
+  // Set GLM_PROXY_MAX_SYSTEM_LEN to enforce a limit (e.g. for free tier).
+  if (MAX_SYSTEM_LEN > 0 && text.length > MAX_SYSTEM_LEN) {
     text = text.slice(0, MAX_SYSTEM_LEN) + "\n\n[... additional context truncated ...]";
   }
 
@@ -285,9 +294,11 @@ function handleRequest(req, res) {
         text = text.replace(/NEVER rename/gi, "Do not rename");
         text = text.replace(/NEVER commit/gi, "Do not commit");
         text = text.replace(/ignore (all )?previous instructions/gi, "follow the instructions");
-        // Truncate very long messages
-        if (text.length > 3000) {
-          text = text.slice(0, 3000) + "\n[... truncated ...]";
+        // Truncate very long messages if limit is set (0 = no truncation).
+        // Default is 0 (no truncation) for unlimited GLM-5.2 with 1M context.
+        // Set GLM_PROXY_MAX_MSG_LEN to enforce a limit (e.g. for free tier).
+        if (MAX_MSG_LEN > 0 && text.length > MAX_MSG_LEN) {
+          text = text.slice(0, MAX_MSG_LEN) + "\n[... truncated ...]";
         }
         if (process.env.GLM_PROXY_DEBUG && (hadSysReminder || msg.role === "system")) {
           console.error(`[glm-proxy] MSG[${msgIdx}] role=${msg.role} origLen=${origLen} newLen=${text.length} removedSysReminder=${hadSysReminder}`);
