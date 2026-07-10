@@ -124,7 +124,8 @@ devin-9router-bridge/
 │   ├── GETTING_DEVIN_TOKEN.md    # How to get Devin session token
 │   ├── TROUBLESHOOTING.md        # Common issues & fixes
 │   ├── ARCHITECTURE.md           # How it works (detailed)
-│   └── HERMES_INTEGRATION.md     # Hermes Agent + GLM-5.2 setup
+│   ├── HERMES_INTEGRATION.md     # Hermes Agent + GLM-5.2 setup
+│   └── OPENCLAW_INTEGRATION.md   # OpenClaw + GLM-5.2 setup
 ├── package.json                  # npm dependencies (protobufjs)
 ├── LICENSE
 └── README.md
@@ -170,6 +171,44 @@ model:
   context_length: 202752
   max_tokens: 131072
 ```
+
+## Using with OpenClaw
+
+OpenClaw can use GLM-5.2 through glm-proxy for **tool calling** (which GLM-5.2 does not support natively in OpenAI format). See **[docs/OPENCLAW_INTEGRATION.md](docs/OPENCLAW_INTEGRATION.md)** for full setup guide.
+
+Quick config — add a `glm-proxy` provider to `openclaw.json`:
+
+```json
+{
+  "models": {
+    "providers": {
+      "glm-proxy": {
+        "baseUrl": "http://localhost:20130",
+        "api": "anthropic-messages",
+        "apiKey": "YOUR_9ROUTER_API_KEY",
+        "auth": "api-key",
+        "models": [
+          {
+            "id": "ws/glm-5-2",
+            "api": "anthropic-messages",
+            "contextWindow": 202752,
+            "maxTokens": 131072
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "glm-proxy/ws/glm-5-2"
+      }
+    }
+  }
+}
+```
+
+An automation script (`fix-openclaw-glm-proxy.py`) is included in the guide to migrate existing GLM models from `9router` to `glm-proxy` automatically.
 
 ## Limitations
 
