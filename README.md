@@ -117,11 +117,14 @@ devin-9router-bridge/
 │   └── windsurf.proto            # Protobuf schema (reverse-engineered)
 ├── scripts/
 │   ├── setup.sh                  # One-command setup
-│   └── auto-start.sh             # macOS launchd auto-start
+│   ├── auto-start.sh             # macOS launchd auto-start
+│   ├── auto-start-linux.sh       # Linux systemd auto-start
+│   └── auto-start-windows.ps1    # Windows Task Scheduler auto-start
 ├── docs/
 │   ├── GETTING_DEVIN_TOKEN.md    # How to get Devin session token
 │   ├── TROUBLESHOOTING.md        # Common issues & fixes
-│   └── ARCHITECTURE.md           # How it works (detailed)
+│   ├── ARCHITECTURE.md           # How it works (detailed)
+│   └── HERMES_INTEGRATION.md     # Hermes Agent + GLM-5.2 setup
 ├── package.json                  # npm dependencies (protobufjs)
 ├── LICENSE
 └── README.md
@@ -141,23 +144,58 @@ tail -f /tmp/glm-proxy.log
 tail -f /tmp/windsurf-server.log
 ```
 
+## Auto-start (all platforms)
+
+| OS | Script | Service type |
+|---|---|---|
+| **macOS** | `./scripts/auto-start.sh` | launchd plist |
+| **Linux** | `./scripts/auto-start-linux.sh` | systemd user service |
+| **Windows** | `powershell -ExecutionPolicy Bypass -File scripts/auto-start-windows.ps1` | Task Scheduler |
+
+Each script installs the glm-proxy as a background service that starts at login and auto-restarts on failure.
+
+## Using with Hermes Agent
+
+Hermes Agent can use GLM-5.2 through glm-proxy for **tool calling** (which GLM-5.2 does not support natively in OpenAI format). See **[docs/HERMES_INTEGRATION.md](docs/HERMES_INTEGRATION.md)** for full setup guide.
+
+Quick config — add to `~/.hermes/config.yaml` (or `%USERPROFILE%\.hermes\config.yaml` on Windows):
+
+```yaml
+model:
+  default: ws/glm-5-2
+  provider: nine-glm
+  api_key: YOUR_9ROUTER_API_KEY
+  base_url: http://localhost:20130    # glm-proxy, NOT 20128
+  api_mode: anthropic_messages        # glm-proxy speaks Anthropic format
+  context_length: 202752
+  max_tokens: 131072
+```
+
 ## Limitations
 
 - **Token expiry:** Devin CLI refreshes tokens in memory but doesn't write them back to `credentials.toml`. If you get "Cascade session" errors, run `devin auth login` again and restart windsurf-server.
 - **Streaming-focused:** Non-streaming responses are not fully tested.
-- **macOS auto-start:** Uses launchd. For Linux, use systemd. For Windows, use a service wrapper.
 - **Content filter:** The Cognition API content filter is aggressive — some complex prompts may still be blocked.
 - **Single tool per turn:** GLM-5.2 may not reliably handle multiple tool calls in one response.
 
 ## Uninstall
 
 ```bash
-# Stop services
+# macOS
 launchctl unload ~/Library/LaunchAgents/com.devin-9router-bridge.glm-proxy.plist 2>/dev/null
+rm ~/Library/LaunchAgents/com.devin-9router-bridge.glm-proxy.plist
+
+# Linux
+systemctl --user stop devin-9router-bridge-glm-proxy 2>/dev/null
+systemctl --user disable devin-9router-bridge-glm-proxy 2>/dev/null
+rm ~/.config/systemd/user/devin-9router-bridge-glm-proxy.service
+
+# Windows (PowerShell)
+Unregister-ScheduledTask -TaskName "Devin9RouterBridge-glm-proxy" -Confirm:$false
+
+# All platforms — kill processes and remove files
 pkill -f "glm-proxy.js"
 pkill -f "windsurf-server.js"
-
-# Remove installed files
 rm -rf ~/.devin-9router-bridge
 
 # Restore Claude Code settings (backup was created during setup)
