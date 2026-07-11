@@ -100,14 +100,14 @@ After setup, `~/.claude/settings.json` is updated:
 
 | Model ID | Backend | Context Window | Max Output | Promo Free? |
 |----------|---------|----------------|------------|-------------|
-| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | ✅ Yes |
-| `swe-1-7` | SWE-1.7 (Cognition, vision) | 128K | 262K | ✅ Yes |
-| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition, vision) | 96K | 202K | ✅ Yes |
-| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ❌ No |
+| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | ✅ Yes (tier 4) |
+| `swe-1-7` | SWE-1.7 (Cognition, vision) | 128K | 262K | ✅ Yes (tier 4) |
+| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition, vision) | 96K | 202K | ✅ Yes (tier 2) |
+| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ✅ Yes (tier 4) |
 
 > **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs.
 >
-> 💡 **GLM-5.2, SWE-1.7, and SWE-1.7 Lightning are promo free models** included with Devin Pro (Windsurf) subscriptions. They consume free credits, not paid quota.
+> 💡 **All 4 models above are promo free** with Devin Pro (Windsurf) — they consume free credits, not paid quota. Paid variants like `glm-5-2-1m` (1M output), `glm-5-2-max` (max effort) require paid credits (tier 1).
 
 Add more models by editing `proxy/windsurf-server.js`.
 
@@ -153,7 +153,7 @@ tail -f /tmp/windsurf-server.log
 
 ## Context window configuration
 
-GLM-5.2 is available as a **promo free model** with Devin Pro (Windsurf) — you get free credits that cover GLM-5.2 usage. The API reports a **128K context window** (input) and **200K max output tokens**. The `glm-5-2-1m` variant supports **1M max output tokens** (but still 128K context window). The proxy defaults to **no truncation** (full context passthrough).
+GLM-5.2 is available as a **promo free model** with Devin Pro (Windsurf) — you get free credits that cover GLM-5.2 usage. The free variant (`glm-5-2`) has a **128K context window** (input) and **200K max output tokens**. The `glm-5-2-1m` variant supports **1M max output tokens** but requires **paid credits** (tier 1, costMultiplier 3x). Context window remains 128K on all variants. The proxy defaults to **no truncation** (full context passthrough).
 
 If you hit content filter or quota limits on the promo tier, set truncation limits via env vars:
 
