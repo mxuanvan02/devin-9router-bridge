@@ -916,6 +916,21 @@ function handleRequest(req, res) {
       };
       delete upstreamBody.tools;
 
+      // 5a. Inject sampling params to prevent GLM-5.2 repetition loops.
+      // GLM-5.2 has a known tendency to get stuck repeating the same phrase.
+      // frequency_penalty penalizes already-seen tokens, breaking repetition.
+      // presence_penalty encourages the model to move to new topics.
+      // Only inject if the client didn't already set these (respect client intent).
+      if (upstreamBody.frequency_penalty === undefined) {
+        upstreamBody.frequency_penalty = 1.5;
+      }
+      if (upstreamBody.presence_penalty === undefined) {
+        upstreamBody.presence_penalty = 0.8;
+      }
+      if (upstreamBody.temperature === undefined) {
+        upstreamBody.temperature = 0.8;
+      }
+
       const upstreamPayload = JSON.stringify(upstreamBody);
 
       const upstreamReq = http.request(
