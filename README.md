@@ -1,6 +1,8 @@
 # Devin → 9Router Bridge
 
 > Use **Devin's GLM-5.2** (and other Cognition models) as a backend for **Claude Code** — no Anthropic API key required.
+>
+> 💡 **Why GLM-5.2?** Devin Pro (Windsurf) includes **promo free credits** for GLM-5.2 High, making it essentially free to use. This bridge lets you tap into those credits from Claude Code.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
@@ -10,7 +12,7 @@
 
 ## Why?
 
-[Devin](https://devin.ai) by Cognition provides access to powerful models like **GLM-5.2 High**, but its API isn't directly compatible with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). This bridge solves three incompatibilities:
+[Devin](https://devin.ai) by Cognition provides access to powerful models like **GLM-5.2 High**, but its API isn't directly compatible with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). GLM-5.2 is included as a **promo free model** with Devin Pro (Windsurf) subscriptions, making it essentially free to use. This bridge solves three incompatibilities:
 
 | Problem | Solution |
 |---------|----------|
@@ -96,14 +98,16 @@ After setup, `~/.claude/settings.json` is updated:
 
 ## Available Models
 
-| Model ID | Backend | Context Window | Max Output |
-|----------|---------|----------------|------------|
-| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K |
-| `swe-1-7` | SWE-1.7 (Cognition, vision) | 128K | 262K |
-| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition, vision) | 96K | 202K |
-| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K |
+| Model ID | Backend | Context Window | Max Output | Promo Free? |
+|----------|---------|----------------|------------|-------------|
+| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | ✅ Yes |
+| `swe-1-7` | SWE-1.7 (Cognition, vision) | 128K | 262K | ✅ Yes |
+| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition, vision) | 96K | 202K | ✅ Yes |
+| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ❌ No |
 
 > **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs.
+>
+> 💡 **GLM-5.2, SWE-1.7, and SWE-1.7 Lightning are promo free models** included with Devin Pro (Windsurf) subscriptions. They consume free credits, not paid quota.
 
 Add more models by editing `proxy/windsurf-server.js`.
 
@@ -149,9 +153,9 @@ tail -f /tmp/windsurf-server.log
 
 ## Context window configuration
 
-GLM-5.2 via Devin has a **128K context window** (input) and **200K max output tokens**. The `glm-5-2-1m` variant supports **1M max output tokens** (but still 128K context window). The proxy defaults to **no truncation** (full context passthrough).
+GLM-5.2 is available as a **promo free model** with Devin Pro (Windsurf) — you get free credits that cover GLM-5.2 usage. The API reports a **128K context window** (input) and **200K max output tokens**. The `glm-5-2-1m` variant supports **1M max output tokens** (but still 128K context window). The proxy defaults to **no truncation** (full context passthrough).
 
-For the **free tier** (which may have stricter limits), set truncation limits via env vars:
+If you hit content filter or quota limits on the promo tier, set truncation limits via env vars:
 
 ```bash
 # Free tier: truncate system prompt to 1500 chars, messages to 3000 chars
