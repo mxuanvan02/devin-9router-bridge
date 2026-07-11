@@ -4,14 +4,16 @@ const fs = require("fs");
 const os = require("os");
 const protobuf = require("protobufjs");
 
-const PROTO_PATH = path.join("/Users/van/Projects/devin-9router-bridge/proto", "windsurf.proto");
+const PROTO_PATH = path.join(__dirname, "proto", "windsurf.proto");
 const root = protobuf.loadSync(PROTO_PATH);
 const GetCliModelConfigsRequest = root.lookupType("exa.api_server_pb.GetCliModelConfigsRequest");
 const GetCliModelConfigsResponse = root.lookupType("exa.api_server_pb.GetCliModelConfigsResponse");
 
 const credPath = path.join(os.homedir(), ".local", "share", "devin", "credentials.toml");
 const content = fs.readFileSync(credPath, "utf8");
-const token = content.match(/windsurf_api_key\s*=\s*"([^"]+)"/)[1];
+const m = content.match(/windsurf_api_key\s*=\s*"([^"]+)"/);
+if (!m) { console.error("No windsurf_api_key found in credentials.toml"); process.exit(1); }
+const token = m[1];
 const serverUrl = content.match(/api_server_url\s*=\s*"([^"]+)"/)?.[1] || "https://server.codeium.com";
 const hostname = new URL(serverUrl).hostname;
 
@@ -34,7 +36,7 @@ const options = {
     "Content-Length": buffer.length.toString(),
     "Host": hostname,
   },
-  servername: hostname, rejectUnauthorized: false,
+  servername: hostname,
 };
 
 const req = https.request(options, (res) => {

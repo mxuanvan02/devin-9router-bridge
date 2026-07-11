@@ -148,22 +148,42 @@ function tryRefreshDevinToken() {
 
 // Watch credentials file for changes (Devin CLI may refresh it in background)
 let _fileWatcher = null;
+let _renameDebounce = null;
 function startCredentialWatcher() {
+  // Close existing watcher (if any) before creating a new one
+  if (_fileWatcher) {
+    try { _fileWatcher.close(); } catch {}
+    _fileWatcher = null;
+  }
+
   const credPath = findCredentialsFile();
   if (!credPath) return;
 
   try {
     _fileWatcher = fs.watch(credPath, (eventType) => {
-      if (eventType === "change" || eventType === "rename") {
-        // Debounce: wait a bit for the file to be fully written
-        setTimeout(() => {
+      if (eventType === "rename") {
+        // Atomic writes produce "rename" events and the watcher may stop
+        // firing afterwards. Debounce 500ms, then re-create the watcher.
+        if (_renameDebounce) clearTimeout(_renameDebounce);
+        _renameDebounce = setTimeout(() => {
+          _renameDebounce = null;
+          startCredentialWatcher();
+          // Re-read credentials after re-creating the watcher
           try {
             readDevinCredentials(true);
-            console.error("[windsurf-provider] Credentials file changed, re-read token");
+            console.error("[windsurf-provider] Credentials file renamed, re-read token");
           } catch (e) {
-            // File might be temporarily empty during write
+            // File might be temporarily empty during atomic write
           }
         }, 500);
+      } else if (eventType === "change") {
+        // Invalidate credential cache (existing behavior)
+        try {
+          readDevinCredentials(true);
+          console.error("[windsurf-provider] Credentials file changed, re-read token");
+        } catch (e) {
+          // File might be temporarily empty during write
+        }
       }
     });
     _fileWatcher.on("error", () => {}); // Ignore watcher errors
@@ -171,6 +191,12 @@ function startCredentialWatcher() {
     // fs.watch not available on all platforms
   }
 }
+
+// Close watcher on process termination to avoid leaking file descriptors
+// (don't process.exit — let the server's handler own graceful shutdown)
+process.on("SIGTERM", () => { try { _fileWatcher?.close(); } catch {} });
+process.on("SIGINT", () => { try { _fileWatcher?.close(); } catch {} });
+
 startCredentialWatcher();
 
 /**
@@ -205,13 +231,121 @@ function parseConnectFrames(buffer) {
 }
 
 /**
+ * Fetch an image over HTTPS and return its Buffer.
+ *
+ * Security/performance guarantees:
+ *   - https-only: rejects http:// URLs (no plaintext fetches)
+ *   - 30s timeout (aborts the request if the server is slow)
+ *   - 10MB cap: rejects responses larger than 10MB (prevents memory abuse)
+ *   - Follows 301/302 redirects via the Location header (max 5 hops)
+ *   - Non-blocking: uses async https.get, never touches the event loop
+ *
+ * @param {string} url - absolute https URL
+ * @returns {Promise<Buffer>} downloaded bytes
+ */
+function fetchImageBuffer(url) {
+  const MAX_BYTES = 10 * 1024 * 1024; // 10MB
+  const TIMEOUT_MS = 30000;
+  const MAX_REDIRECTS = 5;
+
+  return new Promise((resolve, reject) => {
+    const doRequest = (targetUrl, hopsLeft) => {
+      let parsed;
+      try {
+        parsed = new URL(targetUrl);
+      } catch (e) {
+        reject(new Error(`Invalid image URL: ${targetUrl}`));
+        return;
+      }
+
+      // https-only: refuse cleartext http
+      if (parsed.protocol !== "https:") {
+        reject(new Error(`Refusing non-https image URL: ${targetUrl}`));
+        return;
+      }
+
+      const req = https.get(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || 443,
+          path: parsed.pathname + parsed.search,
+          method: "GET",
+          headers: { "User-Agent": "9router-windsurf-provider" },
+          servername: parsed.hostname,
+        },
+        (res) => {
+          // Handle redirects (301/302/303/307/308)
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            // Drain redirect body to free the socket
+            res.resume();
+            if (hopsLeft <= 0) {
+              req.destroy();
+              reject(new Error("Too many image redirects (max 5)"));
+              return;
+            }
+            let nextUrl;
+            try {
+              nextUrl = new URL(res.headers.location, targetUrl).href;
+            } catch (e) {
+              req.destroy();
+              reject(new Error(`Bad redirect Location: ${res.headers.location}`));
+              return;
+            }
+            doRequest(nextUrl, hopsLeft - 1);
+            return;
+          }
+
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new Error(`Image fetch returned ${res.statusCode} for ${targetUrl}`));
+            return;
+          }
+
+          const chunks = [];
+          let total = 0;
+          res.on("data", (c) => {
+            total += c.length;
+            if (total > MAX_BYTES) {
+              req.destroy();
+              reject(new Error(`Image exceeds 10MB cap: ${targetUrl}`));
+              return;
+            }
+            chunks.push(c);
+          });
+          res.on("end", () => {
+            resolve(Buffer.concat(chunks));
+          });
+          res.on("error", reject);
+        }
+      );
+
+      req.setTimeout(TIMEOUT_MS, () => {
+        req.destroy(new Error(`Image fetch timed out after ${TIMEOUT_MS}ms: ${targetUrl}`));
+      });
+      req.on("error", reject);
+    };
+
+    doRequest(url, MAX_REDIRECTS);
+  });
+}
+
+/**
  * Parse an OpenAI image_url object into Windsurf ImageData.
+ * Async: data URIs resolve synchronously (no fetch); https URLs are fetched
+ * via fetchImageBuffer (non-blocking, https-only, 10MB cap, 30s timeout).
+ *
  * Supports:
  *   - data URI:  "data:image/png;base64,iVBOR..."
  *   - URL:       "https://example.com/img.png"  (fetched + base64-encoded)
  *   - object:    {url: "...", detail: "..."}
+ *
+ * @returns {Promise<object|null>} ImageData or null on failure
  */
-function parseOpenAIImage(imageUrl) {
+async function parseOpenAIImage(imageUrl) {
   const url = typeof imageUrl === "string" ? imageUrl : imageUrl?.url;
   if (!url) return null;
 
@@ -219,20 +353,25 @@ function parseOpenAIImage(imageUrl) {
   let base64 = "";
 
   if (url.startsWith("data:")) {
-    // Parse data URI: data:image/png;base64,<data>
+    // Parse data URI: data:image/png;base64,<data> (no fetch needed)
     const m = url.match(/^data:([^;]+);base64,(.+)$/);
     if (m) {
       mime = m[1];
       base64 = m[2];
+      // Cap decoded size at 10MB. Base64 is ~37% larger than binary, so
+      // check the base64 string length against 10MB * 1.37.
+      if (base64.length > 10 * 1024 * 1024 * 1.37) {
+        console.error("[windsurf] Image data URI exceeds 10MB limit");
+        return null;
+      }
     } else {
       console.error("[windsurf] Invalid data URI");
       return null;
     }
-  } else if (url.startsWith("http://") || url.startsWith("https://")) {
-    // Fetch + encode — synchronous via child_process curl
+  } else if (url.startsWith("https://")) {
+    // Fetch + encode via async https.get (non-blocking, https-only)
     try {
-      const { execSync } = require("child_process");
-      const buf = execSync(`curl -sL --max-time 30 "${url.replace(/"/g, '\\"')}"`);
+      const buf = await fetchImageBuffer(url);
       // Detect mime from URL extension
       if (url.match(/\.jpe?g$/i)) mime = "image/jpeg";
       else if (url.match(/\.webp$/i)) mime = "image/webp";
@@ -243,6 +382,10 @@ function parseOpenAIImage(imageUrl) {
       console.error(`[windsurf] Failed to fetch image ${url}: ${e.message}`);
       return null;
     }
+  } else if (url.startsWith("http://")) {
+    // Refuse cleartext http image URLs
+    console.error(`[windsurf] Refusing non-https image URL: ${url}`);
+    return null;
   } else {
     console.error(`[windsurf] Unsupported image URL format`);
     return null;
@@ -327,6 +470,11 @@ function openAIToWindsurf(openaiReq, credentials) {
   let systemPrompt = "";
   const messages = [];
   const toolDefs = [];
+  // Collect async image-fetch promises so we can await them all before
+  // building the protobuf request. Each promise resolves to {message, index}
+  // so we can place the fetched image back at the correct position and
+  // preserve ordering across concurrent fetches.
+  const imagePromises = [];
 
   for (const msg of openaiReq.messages || []) {
     if (msg.role === "system") {
@@ -348,8 +496,17 @@ function openAIToWindsurf(openaiReq, credentials) {
           if (part.type === "text") {
             m.content += (m.content ? "\n" : "") + (part.text || "");
           } else if (part.type === "image_url") {
-            const img = parseOpenAIImage(part.image_url);
-            if (img) m.images.push(img);
+            // Reserve a slot now; the async parseOpenAIImage fills it in
+            // after the fetch completes. This preserves image ordering.
+            const slotIndex = m.images.length;
+            m.images.push(null);
+            imagePromises.push(
+              parseOpenAIImage(part.image_url).then((img) => ({
+                message: m,
+                slotIndex,
+                img,
+              }))
+            );
           }
         }
       }
@@ -358,59 +515,74 @@ function openAIToWindsurf(openaiReq, credentials) {
     }
   }
 
-  // Convert OpenAI tools to Windsurf tool definitions
-  if (openaiReq.tools) {
-    for (const tool of openaiReq.tools) {
-      if (tool.type === "function" && tool.function) {
-        toolDefs.push({
-          name: tool.function.name,
-          description: tool.function.description || "",
-          jsonSchema: JSON.stringify(tool.function.parameters || { type: "object", properties: {} }),
-        });
+  // Await all image fetches concurrently, then splice results back into
+  // their reserved slots (preserving original ordering).
+  const request = (async () => {
+    if (imagePromises.length > 0) {
+      const results = await Promise.all(imagePromises);
+      for (const { message, slotIndex, img } of results) {
+        if (img) message.images[slotIndex] = img;
+      }
+      // Drop any slots that failed to resolve (fetch error / invalid URL)
+      for (const m of messages) {
+        m.images = m.images.filter(Boolean);
       }
     }
-  }
 
-  // Determine model name
-  const modelName = openaiReq.model?.replace(/^windsurf\//, "") || "glm-5-2";
-  const modelIndex = modelNameToIndex(modelName);
+    // Convert OpenAI tools to Windsurf tool definitions
+    if (openaiReq.tools) {
+      for (const tool of openaiReq.tools) {
+        if (tool.type === "function" && tool.function) {
+          toolDefs.push({
+            name: tool.function.name,
+            description: tool.function.description || "",
+            jsonSchema: JSON.stringify(tool.function.parameters || { type: "object", properties: {} }),
+          });
+        }
+      }
+    }
 
-  // Build ClientInfo
-  const clientInfo = {
-    clientName: "chisel",
-    clientVersion: "3000.1.27",
-    apiKey: credentials.sessionToken,
-    language: "en",
-    platform: "mac",
-    version: "3000.1.27",
-    clientName2: "chisel",
-    machineId: getStableMachineId(),
-  };
+    // Determine model name
+    const modelName = openaiReq.model?.replace(/^windsurf\//, "") || "glm-5-2";
+    const modelIndex = modelNameToIndex(modelName);
 
-  // Build GenerationConfig
-  const genConfig = {
-    flag: 1,
-    maxTokens: openaiReq.max_tokens || 128000,
-    budgetTokens: 400,
-    temperature: openaiReq.temperature ?? 1.0,
-    topK: 40,
-    topP: openaiReq.top_p ?? 0.95,
-  };
+    // Build ClientInfo
+    const clientInfo = {
+      clientName: "chisel",
+      clientVersion: "3000.1.27",
+      apiKey: credentials.sessionToken,
+      language: "en",
+      platform: "mac",
+      version: "3000.1.27",
+      clientName2: "chisel",
+      machineId: getStableMachineId(),
+    };
 
-  const request = {
-    clientInfo,
-    systemPrompt,
-    messages,
-    modelIndex,
-    generationConfig: genConfig,
-    tools: toolDefs,
-    sessionId: getStableSessionId(),
-    chatFlag: 1,
-    modelName,
-    orgRequestId: randomUUID(),
-  };
+    // Build GenerationConfig
+    const genConfig = {
+      flag: 1,
+      maxTokens: openaiReq.max_tokens || 128000,
+      budgetTokens: 400,
+      temperature: openaiReq.temperature ?? 1.0,
+      topK: 40,
+      topP: openaiReq.top_p ?? 0.95,
+    };
 
-  return _GetChatMessageRequest.create(request);
+    return _GetChatMessageRequest.create({
+      clientInfo,
+      systemPrompt,
+      messages,
+      modelIndex,
+      generationConfig: genConfig,
+      tools: toolDefs,
+      sessionId: getStableSessionId(),
+      chatFlag: 1,
+      modelName,
+      orgRequestId: randomUUID(),
+    });
+  })();
+
+  return request;
 }
 
 /**
@@ -446,6 +618,9 @@ function modelNameToIndex(name) {
     "gpt-5-5-low": 89,
     "swe-1-6-fast": 133,
   };
+  if (!(name in map)) {
+    console.warn(`[provider] Unknown model "${name}", falling back to GLM-5.2 (index 5)`);
+  }
   return map[name] || 5; // default to glm-5-2
 }
 
@@ -497,7 +672,6 @@ function sendWindsurfRequest(protoRequest, credentials) {
       "Host": hostname,
     },
     servername: hostname,
-    rejectUnauthorized: false,
   };
 
   return new Promise((resolve, reject) => {
@@ -513,6 +687,11 @@ function sendWindsurfRequest(protoRequest, credentials) {
       resolve(res);
     });
     req.on("error", reject);
+    // Idle timeout (resets on each data chunk) — appropriate for streaming.
+    // On timeout, req.destroy() fires the "error" handler above → reject.
+    req.setTimeout(120000, () => {
+      req.destroy(new Error("upstream timeout (120s)"));
+    });
     req.write(frame);
     req.end();
   });
@@ -582,8 +761,8 @@ async function execute(openaiReq, credentials) {
     credentials = readDevinCredentials();
   }
 
-  // Convert OpenAI → Windsurf protobuf
-  const protoRequest = openAIToWindsurf(openaiReq, credentials);
+  // Convert OpenAI → Windsurf protobuf (async: fetches image URLs)
+  const protoRequest = await openAIToWindsurf(openaiReq, credentials);
   const requestId = `chatcmpl-${randomUUID()}`;
   const modelName = openaiReq.model?.replace(/^windsurf\//, "") || "glm-5-2";
 
@@ -643,7 +822,9 @@ async function execute(openaiReq, credentials) {
                 tryRefreshDevinToken();
               }
             }
-          } catch {}
+          } catch (e) {
+            console.error("[provider] frame parse skipped: " + e.message);
+          }
           // Trailer means end of stream
           this.push("data: [DONE]\n\n");
           continue;
@@ -658,6 +839,7 @@ async function execute(openaiReq, credentials) {
           }
         } catch (e) {
           // Skip unparseable frames
+          console.error("[provider] stream decode error: " + e.message);
         }
       }
       callback();
@@ -713,7 +895,9 @@ async function executeNonStreaming(openaiReq, credentials) {
           if (chunk.choices?.[0]?.finish_reason === "stop" && !usage) {
             usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
           }
-        } catch {}
+        } catch (e) {
+          console.error("[provider] non-streaming JSON parse error: " + e.message);
+        }
       }
     });
 

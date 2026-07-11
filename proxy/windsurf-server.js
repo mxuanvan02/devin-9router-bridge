@@ -26,6 +26,15 @@ const { randomUUID } = require("crypto");
 const windsurf = require("./windsurf-provider.js");
 
 const PORT = parseInt(process.argv[2] || "8083", 10);
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB
+
+/**
+ * Check if an origin is a localhost origin (http://127.0.0.1 or http://localhost, any port).
+ */
+function isLocalhostOrigin(origin) {
+  if (!origin || typeof origin !== "string") return false;
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
+}
 
 // Available models (verified via live GetCliModelConfigs API call 2026-07-11)
 // All 4 models are promo free (tier 4/2, isPremium=1) with Devin Pro (Windsurf)
@@ -69,11 +78,31 @@ const MODELS = [
 /**
  * Parse JSON body from request.
  */
-function parseBody(req) {
+function parseBody(req, res) {
   return new Promise((resolve, reject) => {
     let body = "";
-    req.on("data", (chunk) => (body += chunk));
+    let bodyBytes = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      if (tooLarge) return; // stop accumulating once exceeded
+      bodyBytes += chunk.length;
+      if (bodyBytes > MAX_BODY_BYTES) {
+        tooLarge = true;
+        body = ""; // release memory
+        if (res && !res.headersSent) {
+          const headers = { "Content-Type": "application/json" };
+          if (isLocalhostOrigin(req.headers.origin)) {
+            headers["Access-Control-Allow-Origin"] = req.headers.origin;
+          }
+          res.writeHead(413, headers);
+          res.end(JSON.stringify({ error: { message: "Request body too large (max 10MB)", type: "invalid_request_error" } }));
+        }
+        req.destroy();
+        reject(new Error("Request body too large (max 10MB)"));
+      }
+    });
     req.on("end", () => {
+      if (tooLarge) return;
       if (!body) return resolve({});
       try {
         resolve(JSON.parse(body));
@@ -88,27 +117,35 @@ function parseBody(req) {
 /**
  * Send JSON response.
  */
-function sendJSON(res, status, data) {
+function sendJSON(res, status, data, req) {
   const json = JSON.stringify(data);
-  res.writeHead(status, {
+  const headers = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  });
+  };
+  const origin = req && req.headers && req.headers.origin;
+  if (isLocalhostOrigin(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  res.writeHead(status, headers);
   res.end(json);
 }
 
 /**
  * Send SSE stream.
  */
-function sendSSEStream(res, stream) {
-  res.writeHead(200, {
+function sendSSEStream(res, stream, req) {
+  const headers = {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
-    "Access-Control-Allow-Origin": "*",
-  });
+  };
+  const origin = req && req.headers && req.headers.origin;
+  if (isLocalhostOrigin(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  res.writeHead(200, headers);
   stream.on("data", (chunk) => res.write(chunk));
   stream.on("end", () => res.end());
   stream.on("error", (e) => {
@@ -125,8 +162,12 @@ function sendSSEStream(res, stream) {
 const server = http.createServer(async (req, res) => {
   // CORS preflight
   if (req.method === "OPTIONS") {
+    if (!isLocalhostOrigin(req.headers.origin)) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "CORS not allowed for this origin", type: "invalid_request_error" } }));
+    }
     res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": req.headers.origin,
       "Access-Control-Allow-Headers": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     });
@@ -139,7 +180,7 @@ const server = http.createServer(async (req, res) => {
       status: "ok",
       service: "windsurf-provider",
       models: MODELS.length,
-    });
+    }, req);
   }
 
   // List models
@@ -153,23 +194,28 @@ const server = http.createServer(async (req, res) => {
         owned_by: "cognition",
         ...m,
       })),
-    });
+    }, req);
   }
 
   // Chat completions
   if (req.url === "/v1/chat/completions" && req.method === "POST") {
     let body;
     try {
-      body = await parseBody(req);
+      body = await parseBody(req, res);
     } catch (e) {
-      return sendJSON(res, 400, { error: { message: e.message, type: "invalid_request_error" } });
+      if (res.headersSent) return; // 413 already sent by parseBody
+      return sendJSON(res, 400, { error: { message: e.message, type: "invalid_request_error" } }, req);
     }
 
     // Validate
     if (!body.messages || !Array.isArray(body.messages)) {
       return sendJSON(res, 400, {
         error: { message: "messages is required and must be an array", type: "invalid_request_error" },
-      });
+      }, req);
+    }
+
+    if (!body.model || typeof body.model !== "string") {
+      return sendJSON(res, 400, { error: { message: "model must be a non-empty string", type: "invalid_request_error" } }, req);
     }
 
     // Normalize model name (strip prefix)
@@ -188,32 +234,33 @@ const server = http.createServer(async (req, res) => {
       console.log(`[windsurf-server] Model "${modelId}" not in predefined list, attempting anyway...`);
     }
 
-    const isStream = body.stream !== false;
+    const isStream = body.stream === true;
 
     console.log(`[${new Date().toISOString()}] ${isStream ? "STREAM" : "NON-STREAM"} model=${modelId} msgs=${body.messages.length}`);
 
     try {
       if (isStream) {
         const { stream } = await windsurf.execute(body);
-        return sendSSEStream(res, stream);
+        return sendSSEStream(res, stream, req);
       } else {
         const result = await windsurf.executeNonStreaming(body);
-        return sendJSON(res, 200, result);
+        return sendJSON(res, 200, result, req);
       }
     } catch (e) {
       console.error(`[windsurf-server] Error: ${e.message}`);
-      return sendJSON(res, 502, {
+      const status = /timeout/i.test(e.message) ? 504 : 502;
+      return sendJSON(res, status, {
         error: {
           message: e.message,
-          type: "upstream_error",
+          type: /timeout/i.test(e.message) ? "timeout_error" : "upstream_error",
           code: "windsurf_api_error",
         },
-      });
+      }, req);
     }
   }
 
   // 404
-  sendJSON(res, 404, { error: { message: `Not found: ${req.url}`, type: "invalid_request_error" } });
+  sendJSON(res, 404, { error: { message: `Not found: ${req.url}`, type: "invalid_request_error" } }, req);
 });
 
 server.listen(PORT, "127.0.0.1", () => {

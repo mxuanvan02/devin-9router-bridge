@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # Devin → 9Router Bridge Setup
 # Connects Devin models (GLM-5.2, etc.) to Claude Code via 9router
@@ -19,6 +19,27 @@ NODE_BIN="${NODE_BIN:-$(which node)}"
 GLM_PROXY_PORT="${GLM_PROXY_PORT:-20130}"
 ROUTER_PORT="${ROUTER_PORT:-20128}"
 WINDSURF_PORT="${WINDSURF_PORT:-8083}"
+
+# Track background PIDs for cleanup
+WINDSURF_PID=""
+GLM_PROXY_PID=""
+SETUP_COMPLETE=0
+INSTALL_DIR_CREATED=0
+
+cleanup() {
+    if [ "$SETUP_COMPLETE" = "1" ]; then
+        return
+    fi
+    # Kill any background processes we started
+    [ -n "$WINDSURF_PID" ] && kill "$WINDSURF_PID" 2>/dev/null
+    [ -n "$GLM_PROXY_PID" ] && kill "$GLM_PROXY_PID" 2>/dev/null
+    # Remove partial install only if this run created it (don't wipe prior good installs)
+    if [ -d "$INSTALL_DIR" ] && [ "$INSTALL_DIR_CREATED" = "1" ]; then
+        warn "Setup incomplete — removing partial install at $INSTALL_DIR"
+        rm -rf "$INSTALL_DIR"
+    fi
+}
+trap cleanup EXIT
 
 # Colors
 RED='\033[0;31m'
@@ -75,7 +96,7 @@ else
     exit 1
 fi
 
-if ! grep -q "windsurf_api_key" "$CRED_FILE" 2>/dev/null; then
+if ! grep -qE 'windsurf_api_key\s*=\s*"[^"]+"' "$CRED_FILE" 2>/dev/null; then
     fail "No windsurf_api_key in $CRED_FILE"
 fi
 
@@ -86,6 +107,12 @@ echo -e "${CYAN}[2/7]${NC} Installing proxy files..."
 echo ""
 
 mkdir -p "$INSTALL_DIR"
+INSTALL_DIR_CREATED=1
+
+# Create secure log directory (avoid leaking secrets to /tmp)
+LOG_DIR="$HOME/.devin-9router-bridge/logs"
+mkdir -p "$LOG_DIR"
+chmod 700 "$LOG_DIR"
 cp "$PROXY_DIR/glm-proxy.js" "$INSTALL_DIR/"
 cp "$PROXY_DIR/windsurf-server.js" "$INSTALL_DIR/"
 cp "$PROXY_DIR/windsurf-provider.js" "$INSTALL_DIR/"
@@ -124,9 +151,10 @@ echo ""
 if curl -s http://127.0.0.1:$WINDSURF_PORT/health >/dev/null 2>&1; then
     ok "Already running"
 else
-    nohup "$NODE_BIN" "$INSTALL_DIR/windsurf-server.js" $WINDSURF_PORT >/tmp/windsurf-server.log 2>&1 &
+    nohup "$NODE_BIN" "$INSTALL_DIR/windsurf-server.js" $WINDSURF_PORT >"$LOG_DIR/windsurf-server.log" 2>&1 &
+    WINDSURF_PID=$!
     sleep 2
-    curl -s http://127.0.0.1:$WINDSURF_PORT/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check /tmp/windsurf-server.log"
+    curl -s http://127.0.0.1:$WINDSURF_PORT/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check $LOG_DIR/windsurf-server.log"
 fi
 
 echo ""
@@ -156,7 +184,11 @@ else
     echo "       Base URL: http://127.0.0.1:$WINDSURF_PORT/v1"
     echo "       API Key: devin"
     warn "Configure this in 9router UI, then press Enter to continue..."
-    read -r
+    if [ -t 0 ]; then
+        read -r
+    else
+        warn "Non-interactive mode — skipping manual 9router provider confirmation"
+    fi
 fi
 
 echo ""
@@ -168,9 +200,10 @@ echo ""
 if curl -s http://127.0.0.1:$GLM_PROXY_PORT/health >/dev/null 2>&1; then
     ok "Already running"
 else
-    nohup "$NODE_BIN" "$INSTALL_DIR/glm-proxy.js" $GLM_PROXY_PORT $ROUTER_PORT >/tmp/glm-proxy.log 2>&1 &
+    nohup "$NODE_BIN" "$INSTALL_DIR/glm-proxy.js" $GLM_PROXY_PORT $ROUTER_PORT >"$LOG_DIR/glm-proxy.log" 2>&1 &
+    GLM_PROXY_PID=$!
     sleep 2
-    curl -s http://127.0.0.1:$GLM_PROXY_PORT/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check /tmp/glm-proxy.log"
+    curl -s http://127.0.0.1:$GLM_PROXY_PORT/health >/dev/null 2>&1 && ok "Started" || fail "Failed. Check $LOG_DIR/glm-proxy.log"
 fi
 
 echo ""
@@ -184,13 +217,14 @@ SETTINGS_FILE="$HOME/.claude/settings.json"
 # Try to detect existing 9router API key
 API_KEY=""
 if [ -f "$SETTINGS_FILE" ]; then
-    API_KEY=$(python3 -c "
-import json
+    API_KEY=$(SETTINGS_FILE="$SETTINGS_FILE" python3 -c '
+import json, os
 try:
-    d = json.load(open('$SETTINGS_FILE'))
-    print(d.get('env',{}).get('ANTHROPIC_API_KEY',''))
-except: print('')
-" 2>/dev/null)
+    settings_file = os.environ["SETTINGS_FILE"]
+    d = json.load(open(settings_file))
+    print(d.get("env",{}).get("ANTHROPIC_API_KEY",""))
+except: print("")
+' 2>/dev/null)
 fi
 
 if [ -z "$API_KEY" ]; then
@@ -201,24 +235,25 @@ if [ -z "$API_KEY" ]; then
 fi
 
 if [ -z "$API_KEY" ]; then
-    warn "No API key found. You'll need to set it manually."
-    echo "       Get your 9router API key from the 9router UI."
-    API_KEY="YOUR_9ROUTER_API_KEY"
+    fail "No 9router API key found. Get it from 9router UI (Settings → API Keys) and re-run this script."
 fi
 
 # Backup existing settings
 if [ -f "$SETTINGS_FILE" ]; then
     cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak.$(date +%Y%m%d%H%M%S)"
     ok "Backed up existing settings.json"
+    # Rotate backups: keep 3 most recent (handle spaces in paths)
+    ls -t "$SETTINGS_FILE".bak.* 2>/dev/null | tail -n +4 | while IFS= read -r old_bak; do rm -f "$old_bak"; done
 fi
 
 # Update settings.json — preserve existing keys, only override what we need
-python3 -c "
-import json, sys
+SETTINGS_FILE="$SETTINGS_FILE" API_KEY="$API_KEY" GLM_PROXY_PORT="$GLM_PROXY_PORT" python3 -c '
+import json, os
 
-settings_file = '$SETTINGS_FILE'
-api_key = '$API_KEY'
-base_url = 'http://localhost:$GLM_PROXY_PORT'
+settings_file = os.environ["SETTINGS_FILE"]
+api_key = os.environ["API_KEY"]
+glm_proxy_port = os.environ["GLM_PROXY_PORT"]
+base_url = "http://localhost:" + glm_proxy_port
 
 try:
     with open(settings_file) as f:
@@ -226,23 +261,24 @@ try:
 except:
     d = {}
 
-d.setdefault('env', {})
-d['env']['ANTHROPIC_BASE_URL'] = base_url
-d['env']['ANTHROPIC_API_KEY'] = api_key
-d['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'] = 'ws/glm-5-2'
-d['env']['ANTHROPIC_DEFAULT_SONNET_MODEL'] = 'ws/glm-5-2'
-d['env']['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = 'ws/glm-5-2'
-d['model'] = 'ws/glm-5-2'
+d.setdefault("env", {})
+d["env"]["ANTHROPIC_BASE_URL"] = base_url
+d["env"]["ANTHROPIC_API_KEY"] = api_key
+d["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "ws/glm-5-2"
+d["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] = "ws/glm-5-2"
+d["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "ws/glm-5-2"
+d["model"] = "ws/glm-5-2"
 
-with open(settings_file, 'w') as f:
+with open(settings_file, "w") as f:
     json.dump(d, f, indent=2)
-"
+'
 ok "Updated ~/.claude/settings.json"
 ok "  ANTHROPIC_BASE_URL = http://localhost:$GLM_PROXY_PORT"
 ok "  model = ws/glm-5-2"
 echo ""
 
 # ─── Done ────────────────────────────────────────────────────────────────────
+SETUP_COMPLETE=1
 echo -e "${GREEN}  ╔══════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}  ║   ✓ Setup Complete!                                  ║${NC}"
 echo -e "${GREEN}  ╠══════════════════════════════════════════════════════╣${NC}"

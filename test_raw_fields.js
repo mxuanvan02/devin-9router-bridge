@@ -4,14 +4,16 @@ const fs = require("fs");
 const os = require("os");
 const protobuf = require("protobufjs");
 
-const PROTO_PATH = path.join("/Users/van/Projects/devin-9router-bridge/proto", "windsurf.proto");
+const PROTO_PATH = path.join(__dirname, "proto", "windsurf.proto");
 const root = protobuf.loadSync(PROTO_PATH);
 const GetCliModelConfigsRequest = root.lookupType("exa.api_server_pb.GetCliModelConfigsRequest");
 const GetCliModelConfigsResponse = root.lookupType("exa.api_server_pb.GetCliModelConfigsResponse");
 
 const credPath = path.join(os.homedir(), ".local", "share", "devin", "credentials.toml");
 const content = fs.readFileSync(credPath, "utf8");
-const token = content.match(/windsurf_api_key\s*=\s*"([^"]+)"/)[1];
+const m = content.match(/windsurf_api_key\s*=\s*"([^"]+)"/);
+if (!m) { console.error("No windsurf_api_key found in credentials.toml"); process.exit(1); }
+const token = m[1];
 const hostname = "server.codeium.com";
 
 const clientInfo = {
@@ -33,7 +35,7 @@ const options = {
     "Content-Length": buffer.length.toString(),
     "Host": hostname,
   },
-  servername: hostname, rejectUnauthorized: false,
+  servername: hostname,
 };
 
 const req = https.request(options, (res) => {
@@ -43,9 +45,11 @@ const req = https.request(options, (res) => {
     const buf = Buffer.concat(chunks);
     const decoded = GetCliModelConfigsResponse.decode(buf);
     
-    // For each model, re-encode and manually parse raw bytes to find ALL fields
-    [5,6,7,8].forEach(i => {
-      const m = decoded.clientModelConfigs[i];
+    // For each target model, re-encode and manually parse raw bytes to find ALL fields
+    // Select models dynamically by modelUid prefix (same pattern as test_promo.js)
+    decoded.clientModelConfigs
+      .filter(m => m.modelUid && (m.modelUid.startsWith("glm-5-2") || m.modelUid.startsWith("swe-1-7") || m.modelUid.startsWith("kimi-k2-7")))
+      .forEach(m => {
       // Get the raw encoded bytes for this ClientModelConfig
       const subWriter = protobuf.Writer.create();
       m.$type.encode(m, subWriter);

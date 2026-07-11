@@ -8,8 +8,8 @@
     "url": "https://github.com/mxuanvan02/devin-9router-bridge.git"
   },
   "scripts": {
-    "start:windsurf": "node proxy/windsurf-server.js 8083",
-    "start:glm-proxy": "node proxy/glm-proxy.js 20130 20128",
+    "start:windsurf": "node proxy/windsurf-server.js",
+    "start:glm-proxy": "node proxy/glm-proxy.js",
     "setup": "./scripts/setup.sh"
   },
   "dependencies": {

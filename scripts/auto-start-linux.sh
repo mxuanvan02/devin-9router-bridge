@@ -7,6 +7,14 @@ INSTALL_DIR="${1:-$HOME/.devin-9router-bridge}"
 NODE_BIN="${2:-$(which node)}"
 USER_NAME=$(whoami)
 
+# Configurable ports (override via environment variables)
+GLM_PROXY_PORT="${GLM_PROXY_PORT:-20130}"
+ROUTER_PORT="${ROUTER_PORT:-20128}"
+WINDSURF_PORT="${WINDSURF_PORT:-8083}"
+
+# Create secure log directory (avoid leaking secrets to /tmp)
+mkdir -p "$HOME/.devin-9router-bridge/logs" && chmod 700 "$HOME/.devin-9router-bridge/logs"
+
 SERVICE_DIR="$HOME/.config/systemd/user"
 SERVICE_FILE="$SERVICE_DIR/devin-9router-bridge-glm-proxy.service"
 
@@ -19,11 +27,11 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$NODE_BIN $INSTALL_DIR/glm-proxy.js 20130 20128
+ExecStart=$NODE_BIN $INSTALL_DIR/glm-proxy.js ${GLM_PROXY_PORT} ${ROUTER_PORT}
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/tmp/glm-proxy.log
-StandardError=append:/tmp/glm-proxy.error.log
+StandardOutput=append:$HOME/.devin-9router-bridge/logs/glm-proxy.log
+StandardError=append:$HOME/.devin-9router-bridge/logs/glm-proxy.error.log
 
 [Install]
 WantedBy=default.target
