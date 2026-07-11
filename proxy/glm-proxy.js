@@ -24,10 +24,21 @@
  */
 
 const http = require("http");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 
 const PORT = parseInt(process.argv[2] || "20130", 10);
 const UPSTREAM_HOST = "127.0.0.1";
 const UPSTREAM_PORT = parseInt(process.argv[3] || "20128", 10);
+
+// ─── Vision support (route through 9router → windsurf-server ACP) ──────────
+// GLM-5.2 doesn't support vision. When a request contains images, route to
+// 9router with model "ws/kimi-k2-7" which forwards to windsurf-server (port
+// 8083) → ACP path (Devin CLI agent analyzes images via PIL/ImageMagick).
+// 9router handles Anthropic→OpenAI format conversion and response handling,
+// so glm-proxy only needs to: detect images, swap model, strip tools, forward.
+const VISION_MODEL = process.env.VISION_MODEL || "ws/kimi-k2-7";
 
 // ─── Context limits (env-configurable for unlimited/paid GLM-5.2) ──────────
 // GLM-5.2 unlimited supports 1M context. The original 1500/3000 char limits
@@ -529,6 +540,127 @@ function parseToolUseBlocks(text) {
   return { blocks, hasToolUse };
 }
 
+// ─── Vision support (route through 9router → windsurf-server ACP) ──────────
+
+/**
+ * Check if any message in the Anthropic request contains an image block.
+ * Anthropic image format: { type: "image", source: { type: "base64", media_type, data } }
+ */
+function requestHasImage(messages) {
+  for (const msg of messages || []) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === "image") return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Handle vision request by routing through 9router with model "ws/kimi-k2-7".
+ * 9router converts Anthropic→OpenAI and forwards to windsurf-server (port 8083)
+ * which uses the ACP path (Devin CLI agent analyzes images via PIL/ImageMagick).
+ *
+ * We keep the Anthropic format (9router handles conversion), but:
+ * - Swap model to VISION_MODEL ("ws/kimi-k2-7")
+ * - Strip tools (ACP agent has its own tools: exec, read, etc.)
+ * - Sanitize system prompt (reuse rewriteSystemPrompt for safety)
+ * - Convert tool_use/tool_result blocks to text (ACP agent doesn't understand
+ *   Claude Code's tool format)
+ *
+ * The response from 9router is already in Anthropic format, so we pass it
+ * through directly — no conversion needed.
+ */
+function handleVisionRequest(parsed, req, res, isStream, rewrittenSystem) {
+  // Build vision request: same as original but with vision model and no tools
+  const visionBody = {
+    ...parsed,
+    model: VISION_MODEL,
+    system: rewrittenSystem,
+    stream: isStream,
+    tools: undefined,
+  };
+  delete visionBody.tools;
+
+  // Convert tool_use/tool_result blocks to text in messages
+  // (ACP agent has its own tools, doesn't understand Claude Code's tool format)
+  visionBody.messages = (parsed.messages || []).map((msg) => {
+    if (typeof msg.content === "string") return msg;
+    if (!Array.isArray(msg.content)) return msg;
+    const newContent = msg.content.map((block) => {
+      if (block.type === "tool_use") {
+        return { type: "text", text: `[Tool call: ${block.name}]\n${JSON.stringify(block.input)}` };
+      }
+      if (block.type === "tool_result") {
+        const text = typeof block.content === "string" ? block.content :
+          Array.isArray(block.content) ? block.content.map((b) => b.text || "").join("\n") : "";
+        return { type: "text", text: `[Tool result]: ${text}` };
+      }
+      return block; // Keep text and image blocks as-is
+    });
+    return { ...msg, content: newContent };
+  });
+
+  const payload = JSON.stringify(visionBody);
+
+  if (process.env.GLM_PROXY_DEBUG) {
+    console.error(`[glm-proxy] VISION route model=${VISION_MODEL} msgs=${visionBody.messages.length} stream=${isStream}`);
+  }
+
+  // Forward to 9router (same upstream as text path, just different model)
+  const upstreamReq = http.request(
+    {
+      hostname: UPSTREAM_HOST,
+      port: UPSTREAM_PORT,
+      path: req.url,
+      method: "POST",
+      headers: {
+        ...req.headers,
+        host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload),
+      },
+    },
+    (upstreamRes) => {
+      // 9router returns Anthropic format — pass through directly
+      if (upstreamRes.statusCode !== 200) {
+        let errBody = "";
+        upstreamRes.on("data", (c) => (errBody += c.toString()));
+        upstreamRes.on("end", () => {
+          console.error(`[glm-proxy] VISION ERROR ${upstreamRes.statusCode}: ${errBody.slice(0, 500)}`);
+          if (!res.headersSent) {
+            res.writeHead(upstreamRes.statusCode, { "Content-Type": "application/json" });
+            res.end(errBody);
+          }
+        });
+        return;
+      }
+      if (isStream) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+      }
+      upstreamRes.pipe(res);
+    }
+  );
+
+  upstreamReq.on("error", (err) => {
+    console.error(`[glm-proxy] VISION upstream error: ${err.message}`);
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `Vision upstream error: ${err.message}` } }));
+    }
+  });
+
+  upstreamReq.write(payload);
+  upstreamReq.end();
+}
+
 // ─── Request Handler ──────────────────────────────────────────────────────
 
 function handleRequest(req, res) {
@@ -551,6 +683,14 @@ function handleRequest(req, res) {
       let parsed = JSON.parse(body);
       const isStream = parsed.stream !== false;
 
+      // 0. Vision routing: if request contains images, route to windsurf-server
+      // (ACP path with kimi-k2-7) since GLM-5.2 doesn't support vision.
+      if (requestHasImage(parsed.messages)) {
+        const rewrittenSystem = rewriteSystemPrompt(parsed.system);
+        handleVisionRequest(parsed, req, res, isStream, rewrittenSystem);
+        return;
+      }
+
       // 1. Rewrite system prompt
       const rewrittenSystem = rewriteSystemPrompt(parsed.system);
 
@@ -562,6 +702,20 @@ function handleRequest(req, res) {
       if (toolInstructions) {
         newSystem += toolInstructions;
       }
+
+      // 3a. Thinking channel: GLM-5.2 tends to narrate reasoning ("Let me first
+      // check...", "Actually, let me...") in its text output. Instead of
+      // suppressing thinking (which hurts quality), we give it a dedicated
+      // <thinking> channel. The proxy strips <thinking>...</thinking> from
+      // the response before forwarding to the client — so the model can reason
+      // freely, but the user only sees the final answer + tool calls.
+      newSystem += "\n\n## Thinking Channel\n" +
+        "You may think step-by-step before acting. Wrap ALL your reasoning, planning, and internal monologue in <thinking>...</thinking> tags.\n" +
+        "Everything OUTSIDE <thinking> tags is shown directly to the user — keep it brief: just tool calls and short final answers.\n" +
+        "Example:\n" +
+        "<thinking>The user wants me to check the tunnel. I'll read the logs first, then check DNS.</thinking>\n" +
+        "<tool_use name=\"Bash\">\n{\"command\":\"tail -20 /var/log/cloudflared.log\"}\n</tool_use>\n" +
+        "Never put reasoning outside <thinking> tags. Never put tool calls inside <thinking> tags.\n";
 
       // 4. Convert messages: ensure all content is text (GLM doesn't understand tool_use/tool_result blocks)
       // Also sanitize message content to remove content-policy-triggering phrases
@@ -806,6 +960,20 @@ function finishSseStream(res, stopReason) {
   res.end();
 }
 
+// ─── Rate-limit header logging ─────────────────────────────────────────────
+// Upstream (9router) may return rate-limit info in response headers.
+// Log them on errors (especially 429) so the user knows their limits.
+
+function logRateLimitHeaders(upstreamRes, label) {
+  const h = upstreamRes.headers || {};
+  const rlKeys = Object.keys(h).filter((k) =>
+    /rate.?limit|retry.?after|x-rl|remaining|reset/i.test(k)
+  );
+  if (rlKeys.length === 0) return;
+  const parts = rlKeys.map((k) => `${k}=${h[k]}`);
+  console.error(`[glm-proxy] ${label} rate-limit headers: ${parts.join(", ")}`);
+}
+
 // ─── Stream Response Handler ──────────────────────────────────────────────
 
 function handleStreamResponse(upstreamRes, res, upstreamBody, tools, retryCount, reqHeaders) {
@@ -817,6 +985,7 @@ function handleStreamResponse(upstreamRes, res, upstreamBody, tools, retryCount,
     upstreamRes.on("data", (c) => (errBody += c.toString()));
     upstreamRes.on("end", () => {
       console.error(`[glm-proxy] UPSTREAM ERROR ${upstreamRes.statusCode}: ${errBody.slice(0, 500)}`);
+      logRateLimitHeaders(upstreamRes, `UPSTREAM ERROR ${upstreamRes.statusCode}`);
       if (!res.headersSent) {
         res.writeHead(upstreamRes.statusCode, { "Content-Type": "application/json" });
         res.end(errBody);
@@ -839,6 +1008,7 @@ function handleStreamResponse(upstreamRes, res, upstreamBody, tools, retryCount,
   let blockStarted = false;
   let toolUseBuffer = "";
   let inToolUse = false;
+  let inThinking = false; // Track <thinking>...</thinking> blocks (stripped before forwarding)
   let toolUseName = "";
   let toolUseId = "";
   let blockIndex = 0;
@@ -891,6 +1061,48 @@ function handleStreamResponse(upstreamRes, res, upstreamBody, tools, retryCount,
 
         if (evt.type === "content_block_delta" && evt.delta?.text) {
           currentText += evt.delta.text;
+
+          // ── Strip <thinking>...</thinking> blocks (reasoning channel, not shown to user) ──
+          if (!inToolUse) {
+            // If inside a thinking block, look for the end tag
+            if (inThinking) {
+              const thinkEnd = currentText.indexOf("</thinking>");
+              if (thinkEnd !== -1) {
+                inThinking = false;
+                currentText = currentText.slice(thinkEnd + 11); // 11 = "</thinking>".length
+              } else {
+                // Still inside thinking — discard and wait for more
+                currentText = "";
+                continue;
+              }
+            }
+            // Check for <thinking> start tag
+            const thinkStart = currentText.indexOf("<thinking>");
+            if (thinkStart !== -1) {
+              // Flush text before <thinking>
+              flushText(currentText.slice(0, thinkStart));
+              const afterThink = currentText.slice(thinkStart + 10); // 10 = "<thinking>".length
+              const thinkEnd = afterThink.indexOf("</thinking>");
+              if (thinkEnd !== -1) {
+                // Complete thinking block in one chunk — discard it
+                currentText = afterThink.slice(thinkEnd + 11);
+              } else {
+                // Thinking continues — enter thinking mode and wait
+                inThinking = true;
+                currentText = "";
+                continue;
+              }
+            }
+            // Handle partial "<thinking" at end of buffer (might be start of tag)
+            if (currentText) {
+              const partialIdx = currentText.lastIndexOf("<thinking");
+              if (partialIdx !== -1 && partialIdx === currentText.length - "<thinking".length) {
+                flushText(currentText.slice(0, partialIdx));
+                currentText = currentText.slice(partialIdx);
+                continue;
+              }
+            }
+          }
 
           if (inToolUse) {
             // Accumulate until we see </tool_use>
@@ -1192,11 +1404,25 @@ function handleNonStreamResponse(upstreamRes, res) {
   let body = "";
   upstreamRes.on("data", (chunk) => (body += chunk));
   upstreamRes.on("end", () => {
+    // Check for error status from upstream
+    if (upstreamRes.statusCode !== 200) {
+      console.error(`[glm-proxy] UPSTREAM ERROR ${upstreamRes.statusCode}: ${body.slice(0, 500)}`);
+      logRateLimitHeaders(upstreamRes, `UPSTREAM ERROR ${upstreamRes.statusCode}`);
+      if (!res.headersSent) {
+        res.writeHead(upstreamRes.statusCode, { "Content-Type": "application/json" });
+        res.end(body);
+      }
+      return;
+    }
     try {
       const data = JSON.parse(body);
       // If upstream returned OpenAI format, convert to Anthropic
       if (data.choices) {
-        const text = data.choices[0]?.message?.content || "";
+        let text = data.choices[0]?.message?.content || "";
+        // Strip <thinking>...</thinking> blocks (reasoning channel — not shown to user)
+        text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "");
+        // Also strip unclosed <thinking> at end (model forgot to close)
+        text = text.replace(/<thinking>[\s\S]*$/gi, "");
         const { blocks, hasToolUse } = parseToolUseBlocks(text);
         const response = {
           id: data.id || `msg_${Date.now()}`,
@@ -1218,11 +1444,18 @@ function handleNonStreamResponse(upstreamRes, res) {
       } else {
         // Already Anthropic format — parse tool_use from text content
         if (data.content) {
-          const text = data.content.map((b) => b.text || "").join("");
+          let text = data.content.map((b) => b.text || "").join("");
+          // Strip <thinking>...</thinking> blocks (reasoning channel — not shown to user)
+          text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "");
+          // Also strip unclosed <thinking> at end (model forgot to close)
+          text = text.replace(/<thinking>[\s\S]*$/gi, "");
           const { blocks, hasToolUse } = parseToolUseBlocks(text);
           if (hasToolUse) {
             data.content = blocks;
             data.stop_reason = "tool_use";
+          } else {
+            // Update text blocks with stripped content
+            data.content = blocks.length > 0 ? blocks : [{ type: "text", text: text.trim() }];
           }
         }
         if (!res.headersSent) {
