@@ -8,9 +8,11 @@ GLM-5.2 has **no native OpenAI tool-calling support**. When OpenClaw sends reque
 
 The glm-proxy bridge solves this by:
 1. Receiving Anthropic `/v1/messages` format (with tools)
-2. Converting tools → text instructions (`<tool_use>` XML blocks)
+2. Converting tools → text instructions with **full JSON schemas + examples** (`<tool_use>` XML blocks)
 3. Forwarding to 9router **without tools**
 4. Parsing `<tool_use>` blocks from GLM's text response → converting back to Anthropic `tool_use` content blocks
+5. **Fallback parsing** for alternative formats GLM might output (markdown code blocks, function-call style)
+6. Setting `stop_reason: "tool_use"` so OpenClaw executes the tool and continues the turn
 
 ## Architecture
 
@@ -169,6 +171,24 @@ OpenClaw's config validator rejects `apiKeyRef` on custom providers. Use `apiKey
 ### GLM-5.2 returns `[Error: internal error]`
 
 This happens when GLM-5.2 receives tools in OpenAI format (via 9router directly). Make sure the model is under the `glm-proxy` provider with `api: anthropic-messages`, NOT under `9router` with `api: openai-completions`.
+
+### `incomplete turn detected: stopReason=toolUse ... tools=0`
+
+This means OpenClaw received `stop_reason: "tool_use"` but found **zero** tool calls in the stream. This was a known issue when the proxy only sent tool names (no schemas) to GLM, causing it to output malformed tool calls that the proxy couldn't parse.
+
+**Fixed in current version:** The proxy now sends full JSON schemas + examples for each tool, and has fallback parsing for alternative formats. If you still see this after updating:
+
+1. Verify you're running the latest `glm-proxy.js` (check with `curl http://localhost:20130/health`)
+2. Restart the proxy: `kill $(lsof -ti :20130) && node proxy/glm-proxy.js 20130 20128 &`
+3. Test tool calling directly:
+```bash
+curl -s http://localhost:20130/v1/messages \
+  -H "x-api-key: YOUR_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"ws/glm-5-2","max_tokens":1024,"stream":true,"system":"You are a coding assistant.","tools":[{"name":"bash","type":"bash_20250124","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}],"messages":[{"role":"user","content":"Run: echo hello"}]}' 2>&1 | grep -E "tool_use|stop_reason"
+```
+You should see `content_block_start` with `type: "tool_use"` and `stop_reason: "tool_use"`.
 
 ### Model not found after switching
 
