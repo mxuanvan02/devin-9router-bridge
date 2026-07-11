@@ -550,6 +550,13 @@ function handleRequest(req, res) {
       // IMPORTANT: "system" role messages in the array also need sanitization
       const newMessages = (parsed.messages || []).map((msg, msgIdx) => {
         let text = contentToText(msg.content);
+        // Strip content-policy error messages from conversation history.
+        // These contain "blocked by our content policy" and "sensitive or unsafe content"
+        // which themselves trigger the Cognition filter on subsequent requests (feedback loop).
+        // Replace with a benign placeholder so the conversation flow is preserved.
+        if (/\[Error:?\s*(?:Your request was )?blocked by (?:our\s+)?content polic/i.test(text)) {
+          text = text.replace(/\[Error:?\s*(?:Your request was )?blocked by (?:our\s+)?content polic[^\]]*\]/gi, "[Request failed — please retry]");
+        }
         // For system-role messages in the array, apply full system prompt sanitization
         if (msg.role === "system") {
           text = rewriteSystemPrompt(text);
