@@ -50,8 +50,8 @@ model:
   api_key: YOUR_9ROUTER_API_KEY
   base_url: http://localhost:20130
   api_mode: anthropic_messages
-  context_length: 202752
-  max_tokens: 131072
+  context_length: 128000
+  max_tokens: 200000
 
 providers:
   # ... keep your existing providers ...
@@ -64,7 +64,7 @@ providers:
     model: ws/glm-5-2
     models:
       ws/glm-5-2:
-        context_length: 202752
+        context_length: 128000
 
   nine-glm-think:
     base_url: http://127.0.0.1:20130
@@ -74,7 +74,7 @@ providers:
     model: ws/glm-5-2
     models:
       ws/glm-5-2:
-        context_length: 202752
+        context_length: 128000
 
 model_aliases:
   glm-5-2:
@@ -92,7 +92,7 @@ model_aliases:
 | `provider` | `nine-glm` | Custom provider key — resolved to `custom` at runtime |
 | `base_url` | `http://localhost:20130` | glm-proxy port (NOT 20128) |
 | `api_mode` | `anthropic_messages` | glm-proxy speaks Anthropic `/v1/messages` format |
-| `context_length` | `202752` | GLM-5.2 free tier = ~200K tokens |
+| `context_length` | `128000` | GLM-5.2 context window = 128K tokens (from live API) |
 
 ### 3. Two modes
 

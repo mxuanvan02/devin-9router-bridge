@@ -430,22 +430,23 @@ function getStableSessionId() {
  * Map model name to numeric index used by Devin API.
  */
 function modelNameToIndex(name) {
-  // Model indices from GetCliModelConfigs response (positional order)
+  // Model indices from GetCliModelConfigs response (verified via live API call 2026-07-11)
   const map = {
     "claude-opus-4-8-medium": 0,
     "claude-5-fable-medium": 1,
     "claude-sonnet-5-medium": 2,
-    "glm-5-2": 3,
-    "glm-5.2": 3,
-    "gpt-5-5-low": 4,
-    "kimi-k2-7": 5,
-    "kimi-k2.7": 5,
-    "swe-1-7": 6,
-    "swe-1-7-lightning": 7,
-    "adaptive": 8,
-    "swe-1-6-fast": 21,
+    "gpt-5-6-sol-medium": 3,
+    "gpt-5-6-luna-medium": 4,
+    "glm-5-2": 5,
+    "glm-5.2": 5,
+    "kimi-k2-7": 6,
+    "kimi-k2.7": 6,
+    "swe-1-7": 7,
+    "swe-1-7-lightning": 8,
+    "gpt-5-5-low": 89,
+    "swe-1-6-fast": 133,
   };
-  return map[name] || 8; // default to adaptive
+  return map[name] || 5; // default to glm-5-2
 }
 
 /**

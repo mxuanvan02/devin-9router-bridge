@@ -71,8 +71,8 @@ In the `models.providers` section, add a new provider:
             "name": "GLM-5.2 High (glm-proxy)",
             "reasoning": true,
             "input": ["text"],
-            "contextWindow": 202752,
-            "maxTokens": 131072,
+            "contextWindow": 128000,
+            "maxTokens": 200000,
             "api": "anthropic-messages",
             "compat": {
               "supportedReasoningEfforts": ["low", "medium", "high"],
@@ -121,7 +121,7 @@ Also update any per-model params keys in `agents.defaults.models`:
 | `baseUrl` | `http://localhost:20130` | glm-proxy port (NOT 20128) |
 | `api` | `anthropic-messages` | glm-proxy speaks Anthropic `/v1/messages` format |
 | `auth` | `api-key` | Same 9router API key |
-| `contextWindow` | `202752` | GLM-5.2 free tier = ~200K tokens |
+| `contextWindow` | `128000` | GLM-5.2 context window = 128K tokens (from live API) |
 
 ### 6. Validate and restart
 
