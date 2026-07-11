@@ -98,16 +98,16 @@ After setup, `~/.claude/settings.json` is updated:
 
 ## Available Models
 
-| Model ID | Backend | Context Window | Max Output | Promo Free? |
-|----------|---------|----------------|------------|-------------|
-| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | ✅ Yes (tier 4) |
-| `swe-1-7` | SWE-1.7 (Cognition, vision) | 128K | 262K | ✅ Yes (tier 4) |
-| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition, vision) | 96K | 202K | ✅ Yes (tier 2) |
-| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ✅ Yes (tier 4) |
+| Model ID | Backend | Context Window | Max Output | Vision | Promo Free? |
+|----------|---------|----------------|------------|--------|-------------|
+| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | ✅ | ✅ Yes (tier 4) |
+| `swe-1-7` | SWE-1.7 (Cognition) | 128K | 262K | ✅ | ✅ Yes (tier 4) |
+| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition) | 96K | 202K | ✅ | ✅ Yes (tier 2) |
+| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ✅ | ✅ Yes (tier 4) |
 
-> **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs.
+> **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs. All 4 models share the same `ModelFeatures` flags (including vision support).
 >
-> 💡 **All 4 models above are promo free** with Devin Pro (Windsurf) — they consume free credits, not paid quota. Paid variants like `glm-5-2-1m` (1M output), `glm-5-2-max` (max effort) require paid credits (tier 1).
+> 💡 **All 4 models are promo free** with Devin Pro (Windsurf) — they consume free credits, not paid quota. Paid variants like `glm-5-2-1m` (1M output), `glm-5-2-max` (max effort) require paid credits (tier 1). Default config uses `glm-5-2` for all Claude Code tiers (Opus/Sonnet/Haiku).
 
 Add more models by editing `proxy/windsurf-server.js`.
 

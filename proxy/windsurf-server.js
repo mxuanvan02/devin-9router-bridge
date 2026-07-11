@@ -27,19 +27,23 @@ const windsurf = require("./windsurf-provider.js");
 
 const PORT = parseInt(process.argv[2] || "8083", 10);
 
-// Available models (from captured GetCliModelConfigs)
+// Available models (verified via live GetCliModelConfigs API call 2026-07-11)
+// All 4 models are promo free (tier 4/2, isPremium=1) with Devin Pro (Windsurf)
+// All share the same ModelFeatures (feature_8=1, feature_12=1, feature_15=1, feature_24=1)
+// which includes vision support (supports_image_captions in binary)
 const MODELS = [
   {
     id: "glm-5-2",
     name: "GLM-5.2 High",
-    description: "Cognition GLM-5.2 High (via Devin CLI quota)",
+    description: "Cognition GLM-5.2 High (promo free, vision)",
     context_window: 128000,
     max_tokens: 200000,
+    vision: true,
   },
   {
     id: "swe-1-7",
     name: "SWE-1.7",
-    description: "Cognition SWE-1.7 coding model with vision (promo free)",
+    description: "Cognition SWE-1.7 coding model (promo free, vision)",
     context_window: 128000,
     max_tokens: 262000,
     vision: true,
@@ -47,7 +51,7 @@ const MODELS = [
   {
     id: "swe-1-7-lightning",
     name: "SWE-1.7 Lightning",
-    description: "Cognition SWE-1.7 Lightning with vision (promo free)",
+    description: "Cognition SWE-1.7 Lightning (promo free, vision)",
     context_window: 96000,
     max_tokens: 202752,
     vision: true,
@@ -55,10 +59,10 @@ const MODELS = [
   {
     id: "kimi-k2-7",
     name: "Kimi K2.7",
-    description: "Moonshot Kimi K2.7 (via Devin CLI quota, no vision)",
+    description: "Moonshot Kimi K2.7 (promo free, vision)",
     context_window: 16000,
     max_tokens: 262144,
-    vision: false,
+    vision: true,
   },
 ];
 
