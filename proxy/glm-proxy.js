@@ -540,7 +540,15 @@ function parseToolUseBlocks(text) {
   return { blocks, hasToolUse };
 }
 
-// ─── Vision support (route through 9router → windsurf-server ACP) ──────────
+// ─── Vision support (kimi = "eyes", GLM-5.2 = "brain") ─────────────────────
+// When a request contains images:
+//   1. Send each image to kimi-k2-7 (via 9router → windsurf-server ACP) with a
+//      "describe this image" prompt → get a text description back
+//   2. Replace image blocks in the original messages with the text descriptions
+//   3. Forward the modified (text-only) request to 9router with the ORIGINAL
+//      model (e.g. glm-5-2) → GLM-5.2 answers the question using the description
+// This way kimi is just the "eyes" (vision → text), and GLM-5.2 remains the
+// "brain" (reasoning, tools, response formatting).
 
 /**
  * Check if any message in the Anthropic request contains an image block.
@@ -558,57 +566,145 @@ function requestHasImage(messages) {
 }
 
 /**
- * Handle vision request by routing through 9router with model "ws/kimi-k2-7".
- * 9router converts Anthropic→OpenAI and forwards to windsurf-server (port 8083)
- * which uses the ACP path (Devin CLI agent analyzes images via PIL/ImageMagick).
- *
- * We keep the Anthropic format (9router handles conversion), but:
- * - Swap model to VISION_MODEL ("ws/kimi-k2-7")
- * - Strip tools (ACP agent has its own tools: exec, read, etc.)
- * - Sanitize system prompt (reuse rewriteSystemPrompt for safety)
- * - Convert tool_use/tool_result blocks to text (ACP agent doesn't understand
- *   Claude Code's tool format)
- *
- * The response from 9router is already in Anthropic format, so we pass it
- * through directly — no conversion needed.
+ * Send an image to kimi-k2-7 for description (non-streaming).
+ * Returns a text description of the image.
  */
-function handleVisionRequest(parsed, req, res, isStream, rewrittenSystem) {
-  // Build vision request: same as original but with vision model and no tools
-  const visionBody = {
-    ...parsed,
-    model: VISION_MODEL,
-    system: rewrittenSystem,
-    stream: isStream,
-    tools: undefined,
-  };
-  delete visionBody.tools;
+function describeImageWithKimi(imageBlock, reqHeaders) {
+  return new Promise((resolve, reject) => {
+    // Build a minimal request: just the image + "describe" prompt
+    const describePrompt = "Describe this image in detail. Include: objects, colors, text (OCR if any), layout, positions, and any notable features. Be thorough but concise.";
 
-  // Convert tool_use/tool_result blocks to text in messages
-  // (ACP agent has its own tools, doesn't understand Claude Code's tool format)
-  visionBody.messages = (parsed.messages || []).map((msg) => {
+    const body = {
+      model: VISION_MODEL, // "ws/kimi-k2-7"
+      stream: false,
+      system: "You are a vision assistant. Describe images accurately and thoroughly.",
+      messages: [
+        { role: "user", content: [
+          { type: "text", text: describePrompt },
+          { type: "image", source: imageBlock.source }, // pass through base64 source
+        ]},
+      ],
+    };
+
+    const payload = JSON.stringify(body);
+
+    const upstreamReq = http.request(
+      {
+        hostname: UPSTREAM_HOST,
+        port: UPSTREAM_PORT,
+        path: "/v1/messages",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": reqHeaders["x-api-key"] || reqHeaders["authorization"] || "",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (upstreamRes) => {
+        let data = "";
+        upstreamRes.on("data", (c) => (data += c.toString()));
+        upstreamRes.on("end", () => {
+          if (upstreamRes.statusCode !== 200) {
+            reject(new Error(`Kimi vision error ${upstreamRes.statusCode}: ${data.slice(0, 200)}`));
+            return;
+          }
+          try {
+            const resp = JSON.parse(data);
+            const text = (resp.content || []).map((b) => b.text || "").join("\n").trim();
+            resolve(text || "(image description unavailable)");
+          } catch (e) {
+            reject(new Error(`Kimi response parse error: ${e.message}`));
+          }
+        });
+      }
+    );
+
+    upstreamReq.on("error", reject);
+    upstreamReq.write(payload);
+    upstreamReq.end();
+  });
+}
+
+/**
+ * Handle vision request using the "kimi = eyes, GLM = brain" pattern:
+ *   1. Collect all image blocks from messages
+ *   2. Send each to kimi-k2-7 for description (parallel, non-streaming)
+ *   3. Replace image blocks with text descriptions
+ *   4. Forward the text-only request to 9router with the ORIGINAL model
+ *      (preserving tools, system prompt, streaming, etc.)
+ *   5. Pipe the response through (already Anthropic format from 9router)
+ */
+async function handleVisionRequest(parsed, req, res, isStream, rewrittenSystem) {
+  const reqHeaders = req.headers;
+
+  // Step 1: Collect all image blocks with their positions
+  const imageBlocks = []; // {msgIdx, blockIdx, block}
+  (parsed.messages || []).forEach((msg, msgIdx) => {
+    if (Array.isArray(msg.content)) {
+      msg.content.forEach((block, blockIdx) => {
+        if (block.type === "image") {
+          imageBlocks.push({ msgIdx, blockIdx, block });
+        }
+      });
+    }
+  });
+
+  if (process.env.GLM_PROXY_DEBUG) {
+    console.error(`[glm-proxy] VISION: ${imageBlocks.length} image(s), describing with kimi then forwarding to ${parsed.model}`);
+  }
+
+  // Step 2: Describe all images in parallel
+  let descriptions;
+  try {
+    descriptions = await Promise.all(
+      imageBlocks.map((ib) => describeImageWithKimi(ib.block, reqHeaders))
+    );
+  } catch (err) {
+    console.error(`[glm-proxy] VISION describe error: ${err.message}`);
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `Vision describe error: ${err.message}` } }));
+    }
+    return;
+  }
+
+  // Step 3: Build new messages with images replaced by text descriptions
+  const descMap = new Map(); // "msgIdx:blockIdx" → description
+  imageBlocks.forEach((ib, i) => {
+    descMap.set(`${ib.msgIdx}:${ib.blockIdx}`, descriptions[i]);
+  });
+
+  const newMessages = (parsed.messages || []).map((msg, msgIdx) => {
     if (typeof msg.content === "string") return msg;
     if (!Array.isArray(msg.content)) return msg;
-    const newContent = msg.content.map((block) => {
-      if (block.type === "tool_use") {
-        return { type: "text", text: `[Tool call: ${block.name}]\n${JSON.stringify(block.input)}` };
+    const newContent = msg.content.map((block, blockIdx) => {
+      if (block.type === "image") {
+        const desc = descMap.get(`${msgIdx}:${blockIdx}`) || "(image unavailable)";
+        return {
+          type: "text",
+          text: `[Image content]: ${desc}`,
+        };
       }
-      if (block.type === "tool_result") {
-        const text = typeof block.content === "string" ? block.content :
-          Array.isArray(block.content) ? block.content.map((b) => b.text || "").join("\n") : "";
-        return { type: "text", text: `[Tool result]: ${text}` };
-      }
-      return block; // Keep text and image blocks as-is
+      return block;
     });
     return { ...msg, content: newContent };
   });
 
-  const payload = JSON.stringify(visionBody);
+  // Step 4: Forward text-only request to 9router with ORIGINAL model
+  // (preserve tools, system, stream, max_tokens, etc.)
+  const forwardBody = {
+    ...parsed,
+    system: rewrittenSystem,
+    messages: newMessages,
+    // Keep original model, tools, stream — GLM-5.2 handles the rest
+  };
+
+  const payload = JSON.stringify(forwardBody);
 
   if (process.env.GLM_PROXY_DEBUG) {
-    console.error(`[glm-proxy] VISION route model=${VISION_MODEL} msgs=${visionBody.messages.length} stream=${isStream}`);
+    console.error(`[glm-proxy] VISION forward model=${forwardBody.model} msgs=${newMessages.length} stream=${isStream}`);
   }
 
-  // Forward to 9router (same upstream as text path, just different model)
   const upstreamReq = http.request(
     {
       hostname: UPSTREAM_HOST,
@@ -616,19 +712,18 @@ function handleVisionRequest(parsed, req, res, isStream, rewrittenSystem) {
       path: req.url,
       method: "POST",
       headers: {
-        ...req.headers,
+        ...reqHeaders,
         host: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`,
         "content-type": "application/json",
         "content-length": Buffer.byteLength(payload),
       },
     },
     (upstreamRes) => {
-      // 9router returns Anthropic format — pass through directly
       if (upstreamRes.statusCode !== 200) {
         let errBody = "";
         upstreamRes.on("data", (c) => (errBody += c.toString()));
         upstreamRes.on("end", () => {
-          console.error(`[glm-proxy] VISION ERROR ${upstreamRes.statusCode}: ${errBody.slice(0, 500)}`);
+          console.error(`[glm-proxy] VISION forward ERROR ${upstreamRes.statusCode}: ${errBody.slice(0, 500)}`);
           if (!res.headersSent) {
             res.writeHead(upstreamRes.statusCode, { "Content-Type": "application/json" });
             res.end(errBody);
@@ -650,10 +745,10 @@ function handleVisionRequest(parsed, req, res, isStream, rewrittenSystem) {
   );
 
   upstreamReq.on("error", (err) => {
-    console.error(`[glm-proxy] VISION upstream error: ${err.message}`);
+    console.error(`[glm-proxy] VISION forward error: ${err.message}`);
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: `Vision upstream error: ${err.message}` } }));
+      res.end(JSON.stringify({ error: { message: `Vision forward error: ${err.message}` } }));
     }
   });
 
@@ -683,11 +778,18 @@ function handleRequest(req, res) {
       let parsed = JSON.parse(body);
       const isStream = parsed.stream !== false;
 
-      // 0. Vision routing: if request contains images, route to windsurf-server
-      // (ACP path with kimi-k2-7) since GLM-5.2 doesn't support vision.
+      // 0. Vision routing: if request contains images, use kimi-k2-7 as "eyes"
+      // to describe images, then forward text-only request to GLM-5.2 (the
+      // "brain") for reasoning and response.
       if (requestHasImage(parsed.messages)) {
         const rewrittenSystem = rewriteSystemPrompt(parsed.system);
-        handleVisionRequest(parsed, req, res, isStream, rewrittenSystem);
+        handleVisionRequest(parsed, req, res, isStream, rewrittenSystem).catch((err) => {
+          console.error(`[glm-proxy] VISION unhandled error: ${err.message}`);
+          if (!res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: `Vision error: ${err.message}` } }));
+          }
+        });
         return;
       }
 
@@ -1013,9 +1115,10 @@ function handleStreamResponse(upstreamRes, res, upstreamBody, tools, retryCount,
   let toolUseId = "";
   let blockIndex = 0;
   let hasToolUseBlock = false;
+  let repetitionDetected = false;
 
   const flushText = (text) => {
-    if (!text) return;
+    if (!text || repetitionDetected) return;
     if (!blockStarted) {
       res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } })}\n\n`);
       blockStarted = true;
@@ -1050,6 +1153,32 @@ function handleStreamResponse(upstreamRes, res, upstreamBody, tools, retryCount,
           fullResponseText += evt.delta.text;
           if (process.env.GLM_PROXY_DEBUG && fullResponseText.length < 200 && /content policy|blocked|internal error/i.test(fullResponseText)) {
             // Potential content policy error detected
+          }
+        }
+
+        // ── Repetition loop detection ──
+        // GLM-5.2 sometimes gets stuck repeating the same phrase endlessly.
+        // Detect: if the same 20+ char sentence repeats 3+ times, cut off.
+        if (fullResponseText.length > 200 && !hasToolUseBlock && !repetitionDetected) {
+          const tail = fullResponseText.slice(-800);
+          const sentences = tail.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(s => s.length > 20);
+          if (sentences.length >= 4) {
+            const last = sentences[sentences.length - 1];
+            const secondLast = sentences[sentences.length - 2];
+            const thirdLast = sentences[sentences.length - 3];
+            if (last === secondLast && secondLast === thirdLast) {
+              repetitionDetected = true;
+              console.error(`[glm-proxy] REPETITION LOOP detected: "${last.slice(0, 80)}" x3+ — cutting off stream`);
+              if (inToolUse) {
+                res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: blockIndex })}\n\n`);
+                blockIndex++;
+                inToolUse = false;
+              }
+              closeTextBlock();
+              finishSseStream(res, "end_turn");
+              upstreamRes.destroy();
+              return;
+            }
           }
         }
 
