@@ -105,7 +105,9 @@ After setup, `~/.claude/settings.json` is updated:
 | `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition) | 96K | 202K | ✅ | ✅ Yes (tier 2) |
 | `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ✅ | ✅ Yes (tier 4) |
 
-> **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs. All 4 models share the same `ModelFeatures` flags (including vision support).
+> **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs.
+>
+> **Vision** = model can read images sent in prompts (not full multimodal). All 4 models share the same `ModelFeatures` flags, and the proxy sends images to all models — if a model can't process an image, the server silently ignores it.
 >
 > 💡 **All 4 models are promo free** with Devin Pro (Windsurf) — they consume free credits, not paid quota. Paid variants like `glm-5-2-1m` (1M output), `glm-5-2-max` (max effort) require paid credits (tier 1). Default config uses `glm-5-2` for all Claude Code tiers (Opus/Sonnet/Haiku).
 
