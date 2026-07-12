@@ -24,28 +24,41 @@
 ## Architecture
 
 ```
-Claude Code (Anthropic API)
-      ↓
-glm-proxy (port 20130)         ← Rewrites prompts, converts tools, vision routing
-      ↓
-      ├─ Text-only requests ──→ 9router (port 20128) → windsurf-server → GLM-5.2
-      │
-      └─ Image requests ──────→ windsurf-server (port 8083) for image description
-                                  (kimi-k2-7 = "eyes" via ACP+PIL)
-                                  ↓
-                                  Replace image with text description
-                                  ↓
-                                  9router → GLM-5.2 = "brain" (answers using description)
+                         Claude Code (Anthropic API)
+                                    ↓
+                         glm-proxy (port 20130)
+                      ← Rewrites prompts, converts tools,
+                         detects images in requests
+                                    ↓
+              ┌─────────────────────┴──────────────────────┐
+              ↓                                            ↓
+     Text-only requests                           Image requests
+              ↓                                            ↓
+     9router (port 20128)                    Phase 1: Describe image
+              ↓                            → windsurf-server (port 8083)
+     windsurf-server                           kimi-k2-7 = "eyes"
+     (port 8083)                               (via ACP + PIL/ImageMagick)
+              ↓                                            ↓
+     GLM-5.2 answers                       Phase 2: Replace image with
+     (reasoning + tools)                    text description, then forward
+                                            ↓
+                                   9router (port 20128)
+                                            ↓
+                                   windsurf-server (port 8083)
+                                            ↓
+                                   GLM-5.2 = "brain"
+                                   (answers using description)
 ```
 
 ### Vision: "Eyes + Brain" pattern
 
-GLM-5.2 doesn't support vision. When Claude Code sends an image:
+GLM-5.2 doesn't support vision. When Claude Code sends an image, the proxy uses a two-phase approach:
 
-1. **kimi-k2-7** (the "eyes") analyzes the image via ACP path (PIL/ImageMagick) and returns a text description
-2. **GLM-5.2** (the "brain") receives the description + the original question and answers normally
+**Phase 1 — "Eyes" (describe):** Send image directly to windsurf-server:8083 → kimi-k2-7 analyzes pixel data via ACP path (PIL/ImageMagick) → returns a text description. Falls back to swe-1-7 if kimi fails.
 
-This preserves GLM-5.2's reasoning, tool use, and response formatting while adding vision capability. Falls back to **swe-1-7** if kimi-k2-7 fails.
+**Phase 2 — "Brain" (answer):** Replace image blocks with `[Image content]: <description>` in the messages, then forward the text-only request through 9router → GLM-5.2, which answers normally using the description.
+
+Both phases go through windsurf-server (port 8083), but Phase 1 goes **direct** (bypasses 9router, since 9router strips images), while Phase 2 goes **through 9router** (normal text path, preserves tools/system prompt/streaming).
 
 ## Prerequisites
 
