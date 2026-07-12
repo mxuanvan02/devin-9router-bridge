@@ -26,6 +26,24 @@ option go_package = "github.com/codeium/exa/api_server_pb";
 service ApiServerService {
   rpc GetChatMessage(GetChatMessageRequest) returns (stream GetChatMessageResponse);
   rpc GetCliModelConfigs(GetCliModelConfigsRequest) returns (GetCliModelConfigsResponse);
+  rpc CheckUserMessageRateLimit(CheckRateLimitRequest) returns (CheckRateLimitResponse);
+}
+
+// ============================================================
+// CheckUserMessageRateLimit — proactive rate limit check
+// ============================================================
+
+message CheckRateLimitRequest {
+  ClientInfo client_info = 1;
+}
+
+message CheckRateLimitResponse {
+  // Field 1: whether the user is currently rate-limited (verified via live API)
+  bool is_rate_limited = 1;
+  // Field 3: remaining messages in the current window (-1 when rate limited)
+  int32 remaining_messages = 3;
+  // Field 4: total messages allowed in the current window (-1 when rate limited)
+  int32 max_messages = 4;
 }
 
 message GetAccountManagedPluginsRequest {}
