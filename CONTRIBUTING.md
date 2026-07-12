@@ -72,9 +72,12 @@ npm install
 
 - [ ] Linux systemd auto-start script
 - [ ] Windows service wrapper
-- [ ] Automated tests
+- [ ] Automated tests (vision routing, tool conversion, content filter)
 - [ ] Support for non-streaming responses
 - [ ] Token auto-refresh via Devin ACP protocol
+- [ ] OCR support (integrate Tesseract for text-in-image extraction)
+- [ ] Vision caching (cache image descriptions to avoid re-analyzing same image)
+- [ ] Multi-image optimization (batch describe in parallel)
 
 ## Questions?
 

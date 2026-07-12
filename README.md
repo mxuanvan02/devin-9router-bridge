@@ -12,27 +12,40 @@
 
 ## Why?
 
-[Devin](https://devin.ai) by Cognition provides access to powerful models like **GLM-5.2 High**, but its API isn't directly compatible with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). GLM-5.2 is included as a **promo free model** with Devin Pro (Windsurf) subscriptions, making it essentially free to use. This bridge solves three incompatibilities:
+[Devin](https://devin.ai) by Cognition provides access to powerful models like **GLM-5.2 High**, but its API isn't directly compatible with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). GLM-5.2 is included as a **promo free model** with Devin Pro (Windsurf) subscriptions, making it essentially free to use. This bridge solves four incompatibilities:
 
 | Problem | Solution |
 |---------|----------|
 | GLM-5.2 errors on `"You are Claude Code"` identity | Rewrites system prompt to generic assistant |
 | GLM-5.2 has no native `tool_use` support | Converts tools ↔ text instructions (XML tags) |
 | Cognition API content filter blocks Claude Code prompts | Sanitizes security/billing/imperative language |
+| GLM-5.2 can't see images | Routes images to kimi-k2-7/swe-1-7 (via ACP+PIL) for description, then GLM-5.2 answers using the description |
 
 ## Architecture
 
 ```
 Claude Code (Anthropic API)
       ↓
-glm-proxy (port 20130)         ← Rewrites prompts, converts tools
+glm-proxy (port 20130)         ← Rewrites prompts, converts tools, vision routing
       ↓
-9router (port 20128)           ← Your existing router
-      ↓
-windsurf-server (port 8083)    ← Devin → OpenAI-compatible API
-      ↓
-server.codeium.com             ← Devin/Cognition backend (GLM-5.2)
+      ├─ Text-only requests ──→ 9router (port 20128) → windsurf-server → GLM-5.2
+      │
+      └─ Image requests ──────→ windsurf-server (port 8083) for image description
+                                  (kimi-k2-7 = "eyes" via ACP+PIL)
+                                  ↓
+                                  Replace image with text description
+                                  ↓
+                                  9router → GLM-5.2 = "brain" (answers using description)
 ```
+
+### Vision: "Eyes + Brain" pattern
+
+GLM-5.2 doesn't support vision. When Claude Code sends an image:
+
+1. **kimi-k2-7** (the "eyes") analyzes the image via ACP path (PIL/ImageMagick) and returns a text description
+2. **GLM-5.2** (the "brain") receives the description + the original question and answers normally
+
+This preserves GLM-5.2's reasoning, tool use, and response formatting while adding vision capability. Falls back to **swe-1-7** if kimi-k2-7 fails.
 
 ## Prerequisites
 
@@ -74,6 +87,9 @@ In Claude Code, any prompt will now route through GLM-5.2 via Devin.
 | `GLM_PROXY_PORT` | 20130 | glm-proxy listen port |
 | `ROUTER_PORT` | 20128 | 9router port |
 | `WINDSURF_PORT` | 8083 | windsurf-server port |
+| `VISION_MODELS` | `kimi-k2-7,swe-1-7` | Vision models (comma-separated fallback) |
+| `VISION_HOST` | `127.0.0.1` | windsurf-server host for vision |
+| `VISION_PORT` | `8083` | windsurf-server port for vision |
 
 ```bash
 GLM_PROXY_PORT=20131 ROUTER_PORT=20129 ./scripts/setup.sh
@@ -100,14 +116,14 @@ After setup, `~/.claude/settings.json` is updated:
 
 | Model ID | Backend | Context Window | Max Output | Vision | Promo Free? |
 |----------|---------|----------------|------------|--------|-------------|
-| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | ✅ | ✅ Yes (tier 4) |
-| `swe-1-7` | SWE-1.7 (Cognition) | 128K | 262K | ✅ | ✅ Yes (tier 4) |
-| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition) | 96K | 202K | ✅ | ✅ Yes (tier 2) |
-| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ✅ | ✅ Yes (tier 4) |
+| `glm-5-2` | GLM-5.2 High (Cognition) | 128K | 200K | Via kimi/swe | ✅ Yes (tier 4) |
+| `swe-1-7` | SWE-1.7 (Cognition) | 128K | 262K | ✅ Native (ACP+PIL) | ✅ Yes (tier 4) |
+| `swe-1-7-lightning` | SWE-1.7 Lightning (Cognition) | 96K | 202K | ✅ Native (ACP+PIL) | ✅ Yes (tier 2) |
+| `kimi-k2-7` | Kimi K2.7 (Moonshot) | 16K | 262K | ✅ Native (ACP+PIL) | ✅ Yes (tier 4) |
 
 > **Note:** "Context Window" is the input token limit. "Max Output" is the maximum output tokens. These are distinct limits — total tokens (input + output) can exceed the context window. Values are from the live Devin API (`GetCliModelConfigs`), not the model's native specs.
 >
-> **Vision** = model can read images sent in prompts (not full multimodal). All 4 models share the same `ModelFeatures` flags, and the proxy sends images to all models — if a model can't process an image, the server silently ignores it.
+> **Vision** = model can analyze images via ACP path (Devin CLI agent uses PIL/ImageMagick). GLM-5.2 itself can't see images — the proxy routes image requests to kimi-k2-7/swe-1-7 for description, then GLM-5.2 answers using the text description ("eyes + brain" pattern).
 >
 > 💡 **All 4 models are promo free** with Devin Pro (Windsurf) — they consume free credits, not paid quota. Paid variants like `glm-5-2-1m` (1M output), `glm-5-2-max` (max effort) require paid credits (tier 1). Default config uses `glm-5-2` for all Claude Code tiers (Opus/Sonnet/Haiku).
 
@@ -244,6 +260,8 @@ An automation script (`fix-openclaw-glm-proxy.py`) is included in the guide to m
 - **Streaming-focused:** Non-streaming responses are not fully tested.
 - **Content filter:** The Cognition API content filter is aggressive — some complex prompts may still be blocked.
 - **Single tool per turn:** GLM-5.2 may not reliably handle multiple tool calls in one response.
+- **Vision (OCR):** kimi-k2-7/swe-1-7 analyze images via PIL/ImageMagick (pixel-level). They handle colors, shapes, dimensions, and simple charts well, but **cannot OCR text** in images (PIL doesn't include Tesseract). For OCR, install `tesseract` and use the `ai-multimodal` skill.
+- **Vision (complex scenes):** Complex images (detailed scenes, multi-object photos) may take 2-3 minutes per image due to ACP agent's pixel-by-pixel analysis. Simple images (solid colors, shapes) take ~10-15s.
 
 ## Uninstall
 
