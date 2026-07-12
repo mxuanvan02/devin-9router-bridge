@@ -86,6 +86,7 @@ function parseBody(req, res) {
     req.on("data", (chunk) => {
       if (tooLarge) return; // stop accumulating once exceeded
       bodyBytes += chunk.length;
+      body += chunk.toString();
       if (bodyBytes > MAX_BODY_BYTES) {
         tooLarge = true;
         body = ""; // release memory
